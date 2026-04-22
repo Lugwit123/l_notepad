@@ -1,0 +1,31 @@
+{
+  "db_path": "d:\\TD_Depot\\Software\\Lugwit_syncPlug\\lugwit_insapp\\trayapp\\rez-package-source\\l_notepad\\999.0\\data\\notepad.sqlite3",
+  "root_dir": "D:\\TD_Depot\\Software\\Lugwit_syncPlug\\lugwit_insapp\\trayapp\\rez-package-source\\l_notepad\\999.0\\src\\l_notepad\\notepad_list",
+  "dry_run": false,
+  "sqlite_count": 3,
+  "exported_count": 3,
+  "items": [
+    {
+      "sqlite_id": 1,
+      "title": "未命名",
+      "target_rel_path": "未命名",
+      "created_at": "2026-04-21T08:22:38+00:00",
+      "updated_at": "2026-04-21T08:22:38+00:00"
+    },
+    {
+      "sqlite_id": 2,
+      "title": "webtest",
+      "target_rel_path": "webtest",
+      "created_at": "2026-04-21T08:31:52+00:00",
+      "updated_at": "2026-04-21T08:31:52+00:00"
+    },
+    {
+      "sqlite_id": 3,
+      "title": "python-lprint-structured-logging.mdc",
+      "target_rel_path": "python-lprint-structured-logging.mdc",
+      "created_at": "2026-04-21T08:53:07+00:00",
+      "updated_at": "2026-04-21T08:53:07+00:00"
+    }
+  ],
+  "items_total": 3
+}

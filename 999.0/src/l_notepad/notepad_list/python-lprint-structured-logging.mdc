@@ -1,0 +1,35 @@
+---
+description: 全局：Python lprint 结构化日志（禁止在 lprint 参数里用 f-string 拼键值）
+alwaysApply: true
+---
+
+# 结构化 `lprint`（所有项目）
+
+## 目标
+
+- 使用 `Lugwit_Module.lprint` / `LM.lprint`（或项目内同名封装）时，让每个逻辑字段成为 **独立参数**，便于日志按 `[arg0]、[arg1]…` 展开（Deadline / 检索友好）。
+- **不要在 `lprint(...)` 的参数里用 f-string** 拼一整段「键=值」；用 **`(键, 值)` 二元组** 传字段；需要格式时在传入前 `round` / `repr`。
+
+## 标准写法
+
+1. 第一个参数：标签字符串，如 `"[UPLOAD][SUMMARY]"`、`"[上传详情]"`。
+2. 后续参数：一律 **`("字段名", 值)`** 二元组。
+3. `kwargs` 仅保留打印库约定项（如 `level="WARNING"`），放最后。
+
+```python
+lprint(
+    "[UPLOAD][SUMMARY]",
+    ("folder", folder),
+    ("upload_file_count", len(upload_files)),
+    ("elapsed_s", round(elapsed, 3)),
+)
+```
+
+## 避免
+
+- `lprint(f"...")`；`"key", value, "key2", value2` 交替平铺（与二元组约定不一致）。
+
+## 说明
+
+- 本文件位于用户目录 **`%USERPROFILE%\.cursor\rules\`**，并设置 **`alwaysApply: true`**，供 Cursor 在所有工作区加载（若你使用的 Cursor 版本支持用户级 rules）。
+- 若未生效：打开 **Cursor Settings → Rules**，将上述要点粘贴为 **User Rules**。
