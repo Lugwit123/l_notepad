@@ -8,11 +8,23 @@ import subprocess
 import sys
 import time
 from contextlib import suppress
+from pathlib import Path
 
-from PySide6 import QtWidgets
+from PySide6 import QtGui, QtWidgets
 
 from .api_client import NotepadApi
 from .web_ui import WebNotepadWindow
+
+
+def _set_windows_appid(appid: str) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
+    except Exception:
+        pass
 
 
 def _find_free_port() -> int:
@@ -53,6 +65,7 @@ def _start_backend_subprocess(host: str, port: int) -> subprocess.Popen:
 
 
 def main() -> int:
+    _set_windows_appid("Lugwit.l_notepad.with_api")
     host = os.environ.get("L_NOTEPAD_HOST", "127.0.0.1")
     port_env = int(os.environ.get("L_NOTEPAD_PORT", "8765"))
     port = _find_free_port() if port_env == 0 else port_env
@@ -69,6 +82,9 @@ def main() -> int:
         return 2
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    icon_path = Path(__file__).resolve().parent / "static" / "favicon.svg"
+    if icon_path.exists():
+        app.setWindowIcon(QtGui.QIcon(str(icon_path)))
     # Desktop app loads the web frontend directly.
     _ = NotepadApi(base_url)  # keep for potential future health/extension
     win = WebNotepadWindow(web_url)
