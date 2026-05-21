@@ -1,0 +1,268 @@
+import os
+import sys
+import threading
+import time
+from concurrent import interpreters
+from multiprocessing import Pool
+from threading import Thread
+from typing import List
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def subinterpreters_available() -> bool:
+    """兼容不同 Python 版本的子解释器可用性检测。"""
+    checker = getattr(interpreters, "is_available", None)
+    if callable(checker):
+        return bool(checker())
+    # 无 is_available() 时，模块已成功导入即可认为功能可用
+    return True
+
+
+
+def read_positive_int_env(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        print(f"[配置] 忽略无效环境变量 {name}={value!r}，使用默认值 {default}", flush=True)
+        return default
+    if parsed <= 0:
+        print(f"[配置] 忽略非正数环境变量 {name}={value!r}，使用默认值 {default}", flush=True)
+        return default
+    return parsed
+
+
+
+def timed_run(name: str, func, *args) -> float:
+    print(f"[开始] {name}", flush=True)
+    elapsed = func(*args)
+    print(f"[完成] {name}: {elapsed:.4f} 秒", flush=True)
+    return elapsed
+
+
+
+# ===== 1. 核心任务函数（必须定义在模块级别，供多进程使用） =====
+def cpu_intensive_task(n: int) -> int:
+    """计算 1 到 n 的平方和（纯 CPU 计算）"""
+    return sum(i * i for i in range(n))
+
+
+
+# ===== 2. 串行执行测试 =====
+def test_serial(tasks: List[int]) -> float:
+    start = time.perf_counter()
+    [cpu_intensive_task(n) for n in tasks]
+    return time.perf_counter() - start
+
+
+# ===== 3. 子解释器并行测试 =====
+def test_subinterpreters(tasks: List[int], num_workers: int) -> float:
+    task_queue = interpreters.create_queue()
+    result_queue = interpreters.create_queue()
+    results = []
+    worker_code = """
+def cpu_intensive_task(n):
+    return sum(i * i for i in range(n))
+
+
+while True:
+    task = task_queue.get()
+    if task is None:
+        break
+    idx, n = task
+    result_queue.put((idx, cpu_intensive_task(n)))
+"""
+    
+    # 生产者：分发任务
+    def producer():
+        for i, n in enumerate(tasks):
+            task_queue.put((i, n))
+        for _ in range(num_workers):
+            task_queue.put(None)  # 结束信号
+    
+    # 启动测试
+    producer_thread = Thread(target=producer)
+    worker_threads = []
+    worker_errors = []
+    interp_list = []
+
+
+    def run_worker(interp):
+        try:
+            interp.exec(worker_code)
+        except Exception as exc:
+            worker_errors.append(exc)
+
+
+    for _ in range(num_workers):
+        interp = interpreters.create()
+        interp.prepare_main({"task_queue": task_queue, "result_queue": result_queue})
+        interp_list.append(interp)
+        t = Thread(target=run_worker, args=(interp,))
+        worker_threads.append(t)
+    
+    start = time.perf_counter()
+    producer_thread.start()
+    for t in worker_threads:
+        t.start()
+    
+    producer_thread.join()
+    for t in worker_threads:
+        t.join()
+
+
+    if worker_errors:
+        raise RuntimeError("子解释器 worker 执行失败") from worker_errors[0]
+
+
+    for _ in range(len(tasks)):
+        results.append(result_queue.get())
+
+
+    for interp in interp_list:
+        interp.close()
+    
+    return time.perf_counter() - start
+
+
+# ===== 4. 线程并行测试 =====
+def test_threads(tasks: List[int], num_workers: int) -> float:
+    task_queue = []
+    results = []
+    lock = threading.Lock()
+    
+    def worker():
+        while True:
+            with lock:
+                if not task_queue:
+                    return
+                idx, n = task_queue.pop(0)
+            
+            result = cpu_intensive_task(n)
+            with lock:
+                results.append((idx, result))
+    
+    # 填充任务队列
+    for i, n in enumerate(tasks):
+        task_queue.append((i, n))
+    
+    threads = [Thread(target=worker) for _ in range(num_workers)]
+    start = time.perf_counter()
+    
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    
+    return time.perf_counter() - start
+
+
+# ===== 5. 多进程测试（关键优化） =====
+def test_multiprocessing(tasks: List[int], num_workers: int) -> float:
+    # 预热进程池（避免首次创建开销）
+    with Pool(num_workers) as pool:
+        pool.map(cpu_intensive_task, [10**5] * num_workers)
+    
+    # 正式测试
+    start = time.perf_counter()
+    with Pool(num_workers) as pool:
+        # 使用map保持任务顺序
+        pool.map(cpu_intensive_task, tasks)
+    return time.perf_counter() - start
+
+
+# ===== 6. 主测试逻辑 =====
+def run_benchmark():
+    CORES = read_positive_int_env("BENCH_WORKERS", os.cpu_count() or 4)
+    TASK_SIZE = read_positive_int_env("BENCH_TASK_SIZE", 10**6)
+    NUM_TASKS = read_positive_int_env("BENCH_NUM_TASKS", CORES)
+    repeats = read_positive_int_env("BENCH_REPEATS", 2)
+    
+    print(f"测试配置: {CORES} 逻辑核心 | 任务数: {NUM_TASKS} | 单任务量: {TASK_SIZE:,}")
+    print(f"Python版本: {sys.version.split()[0]} | 启用子解释器: {subinterpreters_available()}")
+    
+    # 生成任务
+    tasks = [TASK_SIZE] * NUM_TASKS
+    
+    # 预热所有方案
+    warmup_tasks = [min(TASK_SIZE, 100_000)] * min(2, NUM_TASKS)
+    timed_run("Warmup / Serial", test_serial, warmup_tasks)
+    timed_run("Warmup / Subinterpreters", test_subinterpreters, warmup_tasks, min(2, CORES))
+    timed_run("Warmup / Threads", test_threads, warmup_tasks, min(2, CORES))
+    timed_run("Warmup / Multiprocessing", test_multiprocessing, warmup_tasks, min(2, CORES))
+    
+    # 多次测试取平均
+    results = {
+        "Serial": [],
+        "Threads": [],
+        "Subinterpreters": [],
+        "Multiprocessing": []
+    }
+    
+    for repeat_index in range(repeats):
+        print(f"\n[轮次] {repeat_index + 1}/{repeats}", flush=True)
+
+
+        # 串行
+        results["Serial"].append(timed_run("Serial", test_serial, tasks))
+        
+        # 线程
+        results["Threads"].append(timed_run("Threads", test_threads, tasks, CORES))
+        
+        # 子解释器
+        results["Subinterpreters"].append(timed_run("Subinterpreters", test_subinterpreters, tasks, CORES))
+        
+        # 多进程
+        results["Multiprocessing"].append(timed_run("Multiprocessing", test_multiprocessing, tasks, CORES))
+    
+    # 计算统计指标
+    stats = {}
+    for name, times in results.items():
+        stats[name] = {
+            "mean": np.mean(times),
+            "std": np.std(times),
+            "speedup": results["Serial"][0] / np.mean(times)
+        }
+    
+    # 输出结果
+    print("\n" + "="*60)
+    print(f"{'方案':<20} {'平均时间 (秒)':<15} {'标准差':<10} {'加速比':<10}")
+    print("-"*60)
+    for name, data in stats.items():
+        print(f"{name:<20} {data['mean']:<15.4f} {data['std']:<10.4f} {data['speedup']:<10.2f}x")
+    
+    # 可视化
+    labels = list(stats.keys())
+    times = [stats[name]["mean"] for name in labels]
+    speedups = [stats[name]["speedup"] for name in labels]
+    
+    plt.figure(figsize=(12, 7))
+    bars = plt.bar(labels, times, color=['#ff7f0e', '#1f77b4', '#2ca02c', '#d62728'])
+    plt.ylabel('执行时间 (秒)', fontsize=12)
+    plt.title(f'Python并行方案性能对比 (CPU核心: {CORES})', fontsize=14)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # 标注加速比和标准差
+    for i, bar in enumerate(bars):
+        h = bar.get_height()
+        plt.text(
+            bar.get_x() + bar.get_width()/2., 
+            h * 1.02,
+            f"{speedups[i]:.2f}x\n±{stats[labels[i]]['std']:.2f}s",
+            ha='center', 
+            va='bottom',
+            fontsize=9
+        )
+    
+    plt.tight_layout()
+    plt.savefig('parallel_comparison.png', dpi=300, bbox_inches='tight')
+    print("\n详细图表已保存: parallel_comparison.png")
+
+
+if __name__ == "__main__":
+    run_benchmark()

@@ -92,6 +92,33 @@
                 <height>0</height>
                </size>
               </property>
+              <property name="spacing">
+               <number>1</number>
+              </property>
+              <property name="dragDropMode">
+               <enum>QAbstractItemView::InternalMove</enum>
+              </property>
+              <property name="defaultDropAction">
+               <enum>Qt::MoveAction</enum>
+              </property>
+              <property name="dragEnabled">
+               <bool>true</bool>
+              </property>
+              <property name="acceptDrops">
+               <bool>true</bool>
+              </property>
+              <item>
+               <property name="text">
+                <string>问AI
+新建对话</string>
+               </property>
+               <property name="toolTip">
+                <string>创建一个新的 AI 对话会话</string>
+               </property>
+               <property name="data">
+                <string>__ask_ai__</string>
+               </property>
+              </item>
              </widget>
             </item>
             <item>
@@ -161,6 +188,9 @@
                   <height>0</height>
                  </size>
                 </property>
+                <property name="editable">
+                 <bool>true</bool>
+                </property>
                </widget>
               </item>
               <item>
@@ -221,7 +251,81 @@
              </layout>
             </item>
             <item>
-             <widget class="QTextEdit" name="content_edit"/>
+             <widget class="QTabWidget" name="ai_tabs">
+              <property name="visible">
+               <bool>true</bool>
+              </property>
+              <property name="documentMode">
+               <bool>true</bool>
+              </property>
+              <property name="tabsClosable">
+               <bool>true</bool>
+              </property>
+              <widget class="QWidget" name="ai_tab_template">
+               <property name="visible">
+                <bool>false</bool>
+               </property>
+               <attribute name="title">
+                <string>Template</string>
+               </attribute>
+               <layout class="QVBoxLayout" name="ai_tab_layout_template">
+                <property name="spacing">
+                 <number>10</number>
+                </property>
+                <property name="leftMargin">
+                 <number>10</number>
+                </property>
+                <property name="topMargin">
+                 <number>10</number>
+                </property>
+                <property name="rightMargin">
+                 <number>10</number>
+                </property>
+                <property name="bottomMargin">
+                 <number>10</number>
+                </property>
+                <item>
+                 <widget class="QTextEdit" name="ai_tab_content_edit_template">
+                  <property name="objectName">
+                   <string>CodeEditor</string>
+                  </property>
+                  <property name="lineWrapMode">
+                   <enum>QTextEdit::NoWrap</enum>
+                  </property>
+                  <property name="placeholderText">
+                   <string>在这里输入问题，然后点击"问AI"。
+
+支持多会话与上下文记忆。
+模型：千问 / SiliconFlow。</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QTextEdit" name="ai_tab_answer_edit_template">
+                  <property name="objectName">
+                   <string>AiAnswerViewer</string>
+                  </property>
+                  <property name="readOnly">
+                   <bool>true</bool>
+                  </property>
+                  <property name="placeholderText">
+                   <string>AI 回答会显示在这里（支持多会话上下文）</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </widget>
+            </item>
+            <item>
+             <widget class="QTextEdit" name="content_edit">
+              <property name="lineWrapMode">
+               <enum>QTextEdit::WidgetWidth</enum>
+              </property>
+              <property name="acceptDrops">
+               <bool>true</bool>
+              </property>
+             </widget>
             </item>
             <item>
              <widget class="QTextEdit" name="ai_answer_edit">
@@ -230,6 +334,9 @@
               </property>
               <property name="readOnly">
                <bool>true</bool>
+              </property>
+              <property name="lineWrapMode">
+               <enum>QTextEdit::WidgetWidth</enum>
               </property>
               <property name="placeholderText">
                <string>AI 回答会显示在这里</string>
@@ -270,6 +377,13 @@
                <widget class="QPushButton" name="btn_restart">
                 <property name="text">
                  <string>重启</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="btn_ctrl_interval">
+                <property name="text">
+                 <string>Ctrl双击间隔</string>
                 </property>
                </widget>
               </item>
@@ -315,6 +429,9 @@
          <widget class="QTextEdit" name="log_view">
           <property name="readOnly">
            <bool>true</bool>
+          </property>
+          <property name="lineWrapMode">
+           <enum>QTextEdit::NoWrap</enum>
           </property>
           <property name="placeholderText">
            <string>这里显示日志输出</string>

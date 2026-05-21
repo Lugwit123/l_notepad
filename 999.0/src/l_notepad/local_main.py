@@ -16,15 +16,23 @@ from .ui import MainWindow
 
 
 DOUBLE_CTRL_MIN_GAP_SEC = 0.05
-DOUBLE_CTRL_MAX_GAP_SEC = 0.28
+DOUBLE_CTRL_MAX_GAP_SEC = 0.15
 
 
 class DoubleCtrlWatcher:
     """Listary-style global double Ctrl watcher."""
 
-    def __init__(self, callback, log_callback=None) -> None:
+    def __init__(
+        self,
+        callback,
+        log_callback=None,
+        min_gap_sec: float = DOUBLE_CTRL_MIN_GAP_SEC,
+        max_gap_sec: float = DOUBLE_CTRL_MAX_GAP_SEC,
+    ) -> None:
         self._callback = callback
         self._log_callback = log_callback
+        self._min_gap_sec = float(min_gap_sec)
+        self._max_gap_sec = float(max_gap_sec)
         self._last_triggered_at = 0.0
         self._lock = threading.Lock()
         self._pending_logs: list[str] = []
@@ -41,7 +49,7 @@ class DoubleCtrlWatcher:
         if sys.platform == "win32":
             self._log(
                 "启动低级键盘 Hook 双击 Ctrl 监听，"
-                f"有效间隔 {DOUBLE_CTRL_MIN_GAP_SEC:.2f}-{DOUBLE_CTRL_MAX_GAP_SEC:.2f}s"
+                f"有效间隔 {self._min_gap_sec:.2f}-{self._max_gap_sec:.2f}s"
             )
             self._hook_thread = threading.Thread(target=self._run_keyboard_hook, daemon=True)
             self._hook_thread.start()
@@ -56,11 +64,22 @@ class DoubleCtrlWatcher:
         now = time.monotonic()
         gap = now - self._last_ctrl_press_at
         self._log(f"Ctrl Hook 按下，距离上次 {gap:.2f}s")
-        if DOUBLE_CTRL_MIN_GAP_SEC <= gap <= DOUBLE_CTRL_MAX_GAP_SEC:
+        if self._min_gap_sec <= gap <= self._max_gap_sec:
             self._trigger()
             self._last_ctrl_press_at = 0.0
         else:
             self._last_ctrl_press_at = now
+
+    def update_interval(self, max_gap_sec: float) -> None:
+        try:
+            value = max(self._min_gap_sec, min(1.0, float(max_gap_sec)))
+        except Exception:
+            return
+        self._max_gap_sec = value
+        self._log(
+            "双击 Ctrl 间隔已更新，"
+            f"有效间隔 {self._min_gap_sec:.2f}-{self._max_gap_sec:.2f}s"
+        )
 
     def _run_keyboard_hook(self) -> None:
         try:
@@ -361,7 +380,26 @@ def main() -> int:
         if not ok:
             raise RuntimeError("QProcess.startDetached failed")
 
-    win = MainWindow(api, restart_callback=_restart_process)
+    settings = QtCore.QSettings("Lugwit", "l_notepad_pc")
+    max_gap_raw = settings.value("hotkey/double_ctrl_max_gap_sec", str(DOUBLE_CTRL_MAX_GAP_SEC))
+    try:
+        max_gap_sec = float(str(max_gap_raw))
+    except Exception:
+        max_gap_sec = DOUBLE_CTRL_MAX_GAP_SEC
+    max_gap_sec = max(DOUBLE_CTRL_MIN_GAP_SEC, min(1.0, max_gap_sec))
+
+    hotkey_ref: dict[str, DoubleCtrlWatcher] = {}
+
+    def _update_hotkey_interval(value: float) -> None:
+        watcher = hotkey_ref.get("watcher")
+        if watcher is not None:
+            watcher.update_interval(value)
+
+    win = MainWindow(
+        api,
+        restart_callback=_restart_process,
+        hotkey_interval_callback=_update_hotkey_interval,
+    )
     tray = _setup_tray_icon(app, win, app.windowIcon())
 
     def _append_log(message: str) -> None:
@@ -377,7 +415,10 @@ def main() -> int:
             win, "show_from_hotkey", QtCore.Qt.ConnectionType.QueuedConnection
         ),
         log_callback=_append_log,
+        min_gap_sec=DOUBLE_CTRL_MIN_GAP_SEC,
+        max_gap_sec=max_gap_sec,
     )
+    hotkey_ref["watcher"] = hotkey
     win.show()
     code = int(app.exec())
     hotkey.release()

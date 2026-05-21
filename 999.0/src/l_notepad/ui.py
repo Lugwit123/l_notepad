@@ -10,6 +10,7 @@ import re
 import threading
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -35,6 +36,7 @@ SILICONFLOW_API_KEY = os.environ.get(
     "sk-gzwtmzfhglvibdbvrttmsuuqsyyjxghxlxzdhubdefmshqoi",
 )
 ASK_AI_ITEM_ID = "__ask_ai__"
+ASK_AI_SESSION_PREFIX = "__ask_ai_session__:"
 _SILICONFLOW_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -45,158 +47,12 @@ class ModelPrice:
     currency: str = "$"
 
 
-APP_QSS = r"""
-QWidget {
-  font-family: "Segoe UI", "Microsoft YaHei UI", Arial;
-  font-size: 12px;
-  color: #E9EEF5;
-}
-QMainWindow {
-  background: #090D14;
-}
-QWidget#centralwidget {
-  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0B1020, stop:1 #0D1117);
-}
-QWidget#left_panel, QWidget#right_panel, QWidget#tab_log {
-  background: rgba(15, 21, 34, 0.82);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 16px;
-}
-QLineEdit, QTextEdit, QComboBox {
-  background: rgba(18, 24, 38, 0.96);
-  border: 1px solid rgba(137, 221, 255, 0.12);
-  border-radius: 12px;
-  padding: 9px 11px;
-  selection-background-color: rgba(77, 163, 255, 0.35);
-}
-QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
-  border: 1px solid rgba(77, 163, 255, 0.78);
-  background: rgba(21, 30, 48, 0.98);
-}
-QLineEdit::placeholder, QTextEdit::placeholder {
-  color: rgba(233,238,245,0.42);
-}
-QTextEdit#CodeEditor, QTextEdit#LogViewer, QTextEdit#AiAnswerViewer {
-  background: #080D14;
-  color: #D6DEEB;
-  border: 1px solid rgba(137, 221, 255, 0.13);
-  font-family: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
-  line-height: 1.35;
-}
-QComboBox {
-  min-height: 18px;
-}
-QComboBox::drop-down {
-  width: 28px;
-  border: none;
-  border-left: 1px solid rgba(255,255,255,0.08);
-}
-QComboBox QAbstractItemView {
-  background: #101827;
-  border: 1px solid rgba(77, 163, 255, 0.35);
-  border-radius: 10px;
-  padding: 6px;
-  selection-background-color: rgba(77, 163, 255, 0.25);
-  outline: 0;
-}
-QPushButton {
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 10px;
-  padding: 8px 14px;
-  min-height: 18px;
-}
-QPushButton:hover {
-  background: rgba(77, 163, 255, 0.16);
-  border: 1px solid rgba(77, 163, 255, 0.42);
-}
-QPushButton:pressed {
-  background: rgba(77, 163, 255, 0.24);
-}
-QPushButton:disabled {
-  color: rgba(233,238,245,0.32);
-  background: rgba(255,255,255,0.035);
-  border: 1px solid rgba(255,255,255,0.055);
-}
-QPushButton#PrimaryButton {
-  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(77, 163, 255, 0.34), stop:1 rgba(125, 92, 255, 0.28));
-  border: 1px solid rgba(77, 163, 255, 0.62);
-}
-QPushButton#DangerButton {
-  background: rgba(255, 92, 92, 0.16);
-  border: 1px solid rgba(255, 92, 92, 0.50);
-}
-QListWidget {
-  background: rgba(9, 14, 24, 0.82);
-  border: 1px solid rgba(137, 221, 255, 0.10);
-  border-radius: 10px;
-  padding: 2px;
-  outline: 0;
-}
-QListWidget::item {
-  background: transparent;
-  border-radius: 6px;
-  padding: 3px 6px;
-  margin: 0;
-}
-QListWidget::item:hover {
-  background: rgba(255,255,255,0.06);
-}
-QListWidget::item:selected {
-  background: rgba(77, 163, 255, 0.24);
-  border: 1px solid rgba(77, 163, 255, 0.38);
-  color: #FFFFFF;
-}
-QSplitter::handle {
-  background: rgba(137, 221, 255, 0.06);
-  margin: 8px 6px;
-  border-radius: 4px;
-}
-QStatusBar {
-  background: rgba(255,255,255,0.035);
-  color: rgba(233,238,245,0.80);
-}
-QTabWidget::pane {
-  border: none;
-  top: 0;
-}
-QTabBar::tab {
-  background: rgba(255,255,255,0.055);
-  border: 1px solid rgba(255,255,255,0.09);
-  border-radius: 10px;
-  padding: 8px 20px;
-  margin-right: 6px;
-  margin-bottom: 8px;
-}
-QTabBar::tab:selected {
-  background: rgba(77, 163, 255, 0.26);
-  border: 1px solid rgba(77, 163, 255, 0.55);
-  color: #FFFFFF;
-}
-QScrollBar:vertical, QScrollBar:horizontal {
-  background: rgba(255,255,255,0.035);
-  border: none;
-  border-radius: 6px;
-  margin: 2px;
-}
-QScrollBar:vertical {
-  width: 10px;
-}
-QScrollBar:horizontal {
-  height: 10px;
-}
-QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
-  background: rgba(137, 221, 255, 0.24);
-  border-radius: 5px;
-}
-QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
-  background: rgba(137, 221, 255, 0.38);
-}
-QScrollBar::add-line, QScrollBar::sub-line {
-  width: 0;
-  height: 0;
-}
-"""
+def _load_stylesheet() -> str:
+    """从文件加载样式表"""
+    style_path = Path(__file__).resolve().parent / "style.qss"
+    if style_path.exists():
+        return style_path.read_text(encoding="utf-8")
+    return ""
 
 
 @dataclass
@@ -205,9 +61,19 @@ class UiState:
     dirty: bool = False
 
 
+@dataclass
+class AiSession:
+    session_id: str
+    title: str
+    messages: list[dict[str, str]]
+    draft_prompt: str = ""
+    streaming_text: str = ""
+    in_flight: bool = False
+
+
 class AiBridge(QtCore.QObject):
-    chunk = QtCore.Signal(str)
-    finished = QtCore.Signal(bool, str)
+    chunk = QtCore.Signal(int, str, str)
+    finished = QtCore.Signal(int, str, bool, str, str)
 
 
 class ModelBridge(QtCore.QObject):
@@ -216,6 +82,125 @@ class ModelBridge(QtCore.QObject):
 
 class PriceBridge(QtCore.QObject):
     finished = QtCore.Signal(bool, object)
+
+
+class _LineNumberArea(QtWidgets.QWidget):
+    """Side widget that draws line numbers for a LineNumberTextEdit."""
+
+    def __init__(self, editor: "LineNumberTextEdit") -> None:
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(self._editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        self._editor.line_number_area_paint(event)
+
+
+class LineNumberTextEdit(QtWidgets.QTextEdit):
+    """QTextEdit with a line-number gutter on the left side."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
+        self.setAcceptDrops(True)
+        self._line_number_area = _LineNumberArea(self)
+        self._line_bg = QtGui.QColor("#0B1020")
+        self._line_fg = QtGui.QColor("#4B5563")
+        self._line_fg_current = QtGui.QColor("#89DDFF")
+        self.document().blockCountChanged.connect(self._update_line_number_area_width)
+        self.verticalScrollBar().valueChanged.connect(self._line_number_area.update)
+        self.textChanged.connect(self._line_number_area.update)
+        self.cursorPositionChanged.connect(self._line_number_area.update)
+        self._update_line_number_area_width()
+
+    def line_number_area_width(self) -> int:
+        digits = max(2, len(str(max(1, self.document().blockCount()))))
+        fm = self.fontMetrics()
+        return 10 + fm.horizontalAdvance("9") * digits + 6
+
+    def _update_line_number_area_width(self) -> None:
+        w = self.line_number_area_width()
+        self.setViewportMargins(w, 0, 0, 0)
+        self._line_number_area.setGeometry(
+            QtCore.QRect(0, 0, w, self.viewport().height())
+        )
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        w = self.line_number_area_width()
+        self._line_number_area.setGeometry(
+            QtCore.QRect(cr.left(), cr.top(), w, cr.height())
+        )
+
+    def line_number_area_paint(self, event) -> None:
+        painter = QtGui.QPainter(self._line_number_area)
+        painter.fillRect(event.rect(), self._line_bg)
+
+        block = self.document().begin()
+        block_num = 1
+        top_offset = self.verticalScrollBar().value()
+        current_block_num = self.textCursor().blockNumber() + 1
+
+        while block.isValid():
+            layout = block.layout()
+            if layout is None:
+                block = block.next()
+                block_num += 1
+                continue
+            block_top = layout.position().y() - top_offset + self.contentsMargins().top()
+            block_height = layout.boundingRect().height()
+            if block_top > event.rect().bottom():
+                break
+            if block_top + block_height >= event.rect().top():
+                if block_num == current_block_num:
+                    painter.setPen(self._line_fg_current)
+                else:
+                    painter.setPen(self._line_fg)
+                painter.setFont(self.font())
+                paint_rect = QtCore.QRectF(
+                    0, block_top, self._line_number_area.width() - 6, block_height
+                )
+                painter.drawText(
+                    paint_rect,
+                    QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignTop,
+                    str(block_num),
+                )
+            block = block.next()
+            block_num += 1
+        painter.end()
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.FontChange:
+            self._update_line_number_area_width()
+
+    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
+        menu = self.createStandardContextMenu()
+        # 检测右键位置是否有图片
+        cursor = self.cursorForPosition(event.pos())
+        fmt = cursor.charFormat()
+        if fmt.isImageFormat():
+            img_name = fmt.toImageFormat().name()
+            url = QtCore.QUrl(img_name)
+            local_path = url.toLocalFile() if url.isLocalFile() else img_name
+            if local_path and Path(local_path).is_file():
+                menu.addSeparator()
+                act_edit = menu.addAction("用画图编辑图片")
+                act_open_folder = menu.addAction("在资源管理器中显示")
+                act_edit.triggered.connect(
+                    lambda _=False, p=local_path: subprocess.Popen(
+                        ["mspaint", p], creationflags=0x00000008  # DETACHED_PROCESS
+                    )
+                )
+                act_open_folder.triggered.connect(
+                    lambda _=False, p=local_path: subprocess.Popen(
+                        ["explorer", "/select,", p.replace("/", "\\")]
+                    )
+                )
+        menu.exec(event.globalPos())
 
 
 class TerminalCodeHighlighter(QtGui.QSyntaxHighlighter):
@@ -274,10 +259,11 @@ class TerminalCodeHighlighter(QtGui.QSyntaxHighlighter):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, api: NotepadApi, restart_callback=None) -> None:
+    def __init__(self, api: NotepadApi, restart_callback=None, hotkey_interval_callback=None) -> None:
         super().__init__()
         self.api = api
         self._restart_callback = restart_callback
+        self._hotkey_interval_callback = hotkey_interval_callback
         self.state = UiState()
         self._allow_close = False
         self._settings = QtCore.QSettings("Lugwit", "l_notepad_pc")
@@ -290,6 +276,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ai_stream_text = ""
         self._text_font_size = 10
         self._ask_ai_mode = False
+        self._ai_sessions: dict[str, AiSession] = {}
+        self._current_ai_session_id: str | None = None
+        self._ai_request_seq = 0
+        self._active_ai_request_id: int | None = None
+        self._in_selection_changed = False
         self._ai_bridge = AiBridge()
         self._ai_bridge.chunk.connect(self._on_ai_chunk)
         self._ai_bridge.finished.connect(self._on_ai_finished)
@@ -297,7 +288,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._model_bridge.finished.connect(self._on_models_loaded)
         self._price_bridge = PriceBridge()
         self._price_bridge.finished.connect(self._on_prices_loaded)
-        self.setStyleSheet(APP_QSS)
+        self.setStyleSheet(_load_stylesheet())
         self.setWindowTitle("L Notepad")
         self.resize(980, 640)
         icon_path = Path(__file__).resolve().parent / "static" / "favicon.svg"
@@ -331,6 +322,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_price_source = self.findChild(QtWidgets.QLabel, "label_price_source")
         self.content_edit = self.findChild(QtWidgets.QTextEdit, "content_edit")
         self.ai_answer_edit = self.findChild(QtWidgets.QTextEdit, "ai_answer_edit")
+        self.ai_tabs = self.findChild(QtWidgets.QTabWidget, "ai_tabs")
         self.btn_new = self.findChild(QtWidgets.QPushButton, "btn_new")
         self.btn_save = self.findChild(QtWidgets.QPushButton, "btn_save")
         self.btn_delete = self.findChild(QtWidgets.QPushButton, "btn_delete")
@@ -338,6 +330,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_favorite = self.findChild(QtWidgets.QPushButton, "btn_favorite")
         self.btn_ai_ask = self.findChild(QtWidgets.QPushButton, "btn_ai_ask")
         self.btn_restart = self.findChild(QtWidgets.QPushButton, "btn_restart")
+        self.btn_ctrl_interval = self.findChild(QtWidgets.QPushButton, "btn_ctrl_interval")
         self.log_view = self.findChild(QtWidgets.QTextEdit, "log_view")
         splitter = self.findChild(QtWidgets.QSplitter, "splitter_main")
         if splitter is not None:
@@ -364,43 +357,69 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_favorite,
             self.btn_ai_ask,
             self.btn_restart,
+            self.btn_ctrl_interval,
             self.log_view,
+            self.ai_tabs,
         ]
         if any(w is None for w in required_widgets):
             raise RuntimeError("main_window.ui missing required widget objectName(s)")
 
+        # 用带行号的 LineNumberTextEdit 替换 .ui 加载的普通 QTextEdit
+        old_content_edit = self.content_edit
+        parent_layout = old_content_edit.parentWidget().layout() if old_content_edit.parentWidget() else None
+        new_content_edit = LineNumberTextEdit(old_content_edit.parentWidget())
+        new_content_edit.setObjectName("CodeEditor")
+        if parent_layout is not None:
+            idx = parent_layout.indexOf(old_content_edit)
+            parent_layout.removeWidget(old_content_edit)
+            old_content_edit.hide()
+            old_content_edit.deleteLater()
+            parent_layout.insertWidget(idx, new_content_edit)
+        self.content_edit = new_content_edit
+
+        # 初始化 .ui 文件中的 "问AI" item data
+        if self.notes_list.count() > 0:
+            first_item = self.notes_list.item(0)
+            if first_item.text().startswith("问AI"):
+                first_item.setData(QtCore.Qt.ItemDataRole.UserRole, ASK_AI_ITEM_ID)
+                font = first_item.font()
+                font.setBold(True)
+                first_item.setFont(font)
+                first_item.setFlags(first_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
+                first_item.setSizeHint(QtCore.QSize(0, 36))
+
         self.search_edit.textChanged.connect(self._apply_filter)
-        self.notes_list.setSpacing(1)
         self.notes_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.notes_list.itemDoubleClicked.connect(self._rename_note_from_item)
-        self.notes_list.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
-        self.notes_list.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
-        self.notes_list.setDragEnabled(True)
-        self.notes_list.setAcceptDrops(True)
         self.notes_list.model().rowsMoved.connect(self._on_notes_rows_moved)
 
+        # AI 标签页设置
+        self.ai_tabs.tabCloseRequested.connect(self._on_ai_tab_close_requested)
+        self.ai_tabs.currentChanged.connect(self._on_ai_tab_changed)
+        # 为标签栏添加右键菜单
+        self.ai_tabs.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ai_tabs.customContextMenuRequested.connect(self._on_ai_tabs_context_menu)
+        # 设置关闭按钮图标（X符号）
+        self._setup_ai_tab_close_buttons()
+
         self.title_edit.textEdited.connect(self._mark_dirty)
-        self.model_combo.setEditable(True)
         self.model_combo.clear()
         self.model_combo.addItems(DEFAULT_MODEL_PRESETS)
         self.model_combo.setCurrentText(self._selected_ai_model)
         self.model_combo.currentTextChanged.connect(self._on_ai_model_changed)
         self.btn_refresh_models.clicked.connect(self._refresh_ai_models)
 
-        self.content_edit.setObjectName("CodeEditor")
-        self.content_edit.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
         self.content_edit.textChanged.connect(self._mark_dirty)
         self.content_edit.textChanged.connect(self._update_realtime_token_stats)
         self._content_highlighter = TerminalCodeHighlighter(self.content_edit.document())
 
         self.ai_answer_edit.setObjectName("AiAnswerViewer")
-        self.ai_answer_edit.setReadOnly(True)
-        self.ai_answer_edit.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
         self._ai_answer_highlighter = TerminalCodeHighlighter(self.ai_answer_edit.document())
 
         self.btn_save.setObjectName("PrimaryButton")
         self.btn_ai_ask.setObjectName("PrimaryButton")
         self.btn_delete.setObjectName("DangerButton")
+
         self.btn_new.clicked.connect(self._new_note)
         self.btn_save.clicked.connect(self._save_note)
         self.btn_delete.clicked.connect(self._delete_note)
@@ -408,10 +427,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_favorite.clicked.connect(self._toggle_favorite_current)
         self.btn_ai_ask.clicked.connect(self._ask_ai)
         self.btn_restart.clicked.connect(self._restart_app)
+        self.btn_ctrl_interval.clicked.connect(self._configure_ctrl_double_interval)
 
         self.log_view.setObjectName("LogViewer")
-        self.log_view.setReadOnly(True)
-        self.log_view.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
         self._log_highlighter = TerminalCodeHighlighter(self.log_view.document())
         self._apply_text_font_size()
         for editor in (self.content_edit, self.ai_answer_edit, self.log_view):
@@ -420,6 +438,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status = self.statusBar()
         self._refresh_official_prices()
+        # 恢复 AI 标签页
+        self._restore_ai_tabs()
         self.refresh_notes()
         self.append_log("日志窗口已初始化")
         QtWidgets.QApplication.instance().aboutToQuit.connect(self._save_settings)
@@ -437,16 +457,12 @@ class MainWindow(QtWidgets.QMainWindow):
         query = self.search_edit.text().strip()
         notes_sorted = self._sort_notes(notes)
         self.notes_list.blockSignals(True)
-        self.notes_list.clear()
-        ask_item = QtWidgets.QListWidgetItem("问AI\n千问 instant / 硅基流动")
-        ask_font = ask_item.font()
-        ask_font.setBold(True)
-        ask_item.setFont(ask_font)
-        ask_item.setFlags(ask_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
-        ask_item.setData(QtCore.Qt.ItemDataRole.UserRole, ASK_AI_ITEM_ID)
-        ask_item.setToolTip("使用硅基流动的千问 instant 模型提问")
-        ask_item.setSizeHint(QtCore.QSize(0, 36))
-        self.notes_list.addItem(ask_item)
+        # 保留固定的"问AI" item（从.ui文件加载），只清除动态添加的笔记items
+        for i in range(self.notes_list.count() - 1, -1, -1):
+            item = self.notes_list.item(i)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) != ASK_AI_ITEM_ID:
+                self.notes_list.takeItem(i)
+        # AI sessions 不再显示在左侧列表中，而是在右侧标签页中显示
         for n in notes_sorted:
             if query and query.lower() not in n.title.lower():
                 continue
@@ -461,12 +477,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.notes_list.addItem(item)
         self.notes_list.blockSignals(False)
 
+        # AI 会话不再在列表中显示，只选择问AI按钮（第0行）或笔记
         if self._ask_ai_mode:
-            self.notes_list.setCurrentRow(0)
+            self.notes_list.setCurrentRow(0)  # 选择问AI按钮
         elif current_id is not None:
             self._select_note_id(current_id)
         elif self.notes_list.count() > 1:
-            self.notes_list.setCurrentRow(1)
+            self.notes_list.setCurrentRow(1)  # 跳过问AI按钮，选择第一个笔记
         else:
             self._set_editor(None)
         self._update_favorite_button_label()
@@ -481,20 +498,43 @@ class MainWindow(QtWidgets.QMainWindow):
             item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
             if item_id == ASK_AI_ITEM_ID:
                 continue
+            if isinstance(item_id, str) and item_id.startswith(ASK_AI_SESSION_PREFIX):
+                continue
             if int(item_id) == int(note_id):
                 self.notes_list.setCurrentRow(i)
                 return
 
-    def _on_selection_changed(self) -> None:
-        items = self.notes_list.selectedItems()
-        if items and items[0].data(QtCore.Qt.ItemDataRole.UserRole) == ASK_AI_ITEM_ID:
-            self._auto_save_note("切换到问AI前")
-            self._set_ai_editor()
-            return
+    def _select_ai_session_id(self, session_id: str) -> None:
+        target = f"{ASK_AI_SESSION_PREFIX}{session_id}"
+        for i in range(self.notes_list.count()):
+            item = self.notes_list.item(i)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == target:
+                self.notes_list.setCurrentRow(i)
+                return
 
-        if self.state.dirty and not self._confirm_discard():
-            self._select_note_id(self.state.current_note_id) if self.state.current_note_id else None
+    def _on_selection_changed(self) -> None:
+        if self._in_selection_changed:
             return
+        self._in_selection_changed = True
+        try:
+            self._on_selection_changed_inner()
+        finally:
+            self._in_selection_changed = False
+
+    def _on_selection_changed_inner(self) -> None:
+        items = self.notes_list.selectedItems()
+        item_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole) if items else None
+        if item_id == ASK_AI_ITEM_ID:
+            self._auto_save_note("切换到问AI前")
+            session = self._new_ai_session(select=True)
+            self._set_ai_editor(session.session_id)
+            self.refresh_notes()
+            # AI 会话不再在列表中显示，不需要选择
+            return
+        # AI 会话不再在列表中，不再处理 ASK_AI_SESSION_PREFIX
+
+        if self.state.dirty:
+            self._auto_save_note("切换日志前")
 
         if not items:
             self._set_editor(None)
@@ -513,12 +553,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_favorite_button_label()
 
     def _new_note(self) -> None:
+        if self._ask_ai_mode:
+            session = self._new_ai_session(select=True)
+            self.refresh_notes()
+            self._select_ai_session_id(session.session_id)
+            return
         self._ask_ai_mode = False
         if self.state.dirty and not self._confirm_discard():
             return
         self._set_editor(None)
         self.title_edit.setText("未命名")
-        self.content_edit.setPlainText("")
+        self.content_edit.clear()
         self.state.current_note_id = None
         self.state.dirty = True
         self._update_title()
@@ -528,7 +573,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ask_ai()
             return
         title = self.title_edit.text().strip() or "未命名"
-        content = self.content_edit.toPlainText()
+        content = self._get_content_html()
         try:
             if self.state.current_note_id is None:
                 note = self.api.create_note(title=title, content=content)
@@ -548,7 +593,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._ask_ai_mode or not self.state.dirty:
             return
         title = self.title_edit.text().strip() or "未命名"
-        content = self.content_edit.toPlainText()
+        content = self._get_content_html()
         try:
             if self.state.current_note_id is None:
                 note = self.api.create_note(title=title, content=content)
@@ -675,23 +720,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_notes()
         self.status.showMessage(f"已重命名：#{updated.id}", 2500)
 
-    def _set_ai_editor(self) -> None:
+    def _set_ai_editor(self, session_id: str | None = None) -> None:
         self._ask_ai_mode = True
         self.state.current_note_id = None
         self.state.dirty = False
+
+        # 切换到 AI 模式：显示 ai_tabs，隐藏普通编辑器
+        self.ai_tabs.show()
+        self.content_edit.hide()
+        self.ai_answer_edit.hide()
+
+        session = self._ensure_ai_session(session_id)
+        self._current_ai_session_id = session.session_id
+
+        # 检查是否已有对应 session 的标签页
+        tab_index = -1
+        for i in range(self.ai_tabs.count()):
+            widget = self.ai_tabs.widget(i)
+            if widget and widget.property("session_id") == session.session_id:
+                tab_index = i
+                break
+
+        # 如果没有找到对应标签页，创建一个
+        if tab_index < 0:
+            self._create_ai_tab(session)
+        else:
+            # 切换到已有标签页
+            self.ai_tabs.setCurrentIndex(tab_index)
+            # 更新标签页内容
+            self._update_ai_tab_content(session)
+
         self.title_edit.blockSignals(True)
-        self.content_edit.blockSignals(True)
-        self.title_edit.setText("问AI")
-        self.content_edit.setPlainText(
-            "在这里输入问题，然后点击“问AI”。\n\n"
-            "模型：千问 instant\n"
-            "服务：SiliconFlow 硅基流动\n"
-        )
-        self.ai_answer_edit.clear()
-        self.ai_answer_edit.show()
+        self.title_edit.setText(session.title)
         self.title_edit.blockSignals(False)
-        self.content_edit.blockSignals(False)
-        self.btn_ai_ask.setEnabled(True)
+
+        self.btn_ai_ask.setEnabled(not session.in_flight)
+        self.btn_ai_ask.setText("请求中..." if session.in_flight else "问AI")
         self.btn_save.setEnabled(False)
         self.btn_delete.setEnabled(False)
         self.btn_favorite.setEnabled(False)
@@ -699,10 +763,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_title()
         self._update_realtime_token_stats()
 
+    def _update_ai_tab_content(self, session: AiSession) -> None:
+        """更新指定会话的标签页内容"""
+        content_edit = self._get_ai_tab_content_edit(session.session_id)
+        answer_edit = self._get_ai_tab_answer_edit(session.session_id)
+
+        if content_edit:
+            content_edit.blockSignals(True)
+            if session.draft_prompt:
+                content_edit.setPlainText(session.draft_prompt)
+            else:
+                content_edit.setPlainText(
+                    '在这里输入问题，然后点击"问AI"。\n\n'
+                    '支持多会话与上下文记忆。\n'
+                    '模型：千问 / SiliconFlow。\n'
+                )
+            content_edit.blockSignals(False)
+
+        if answer_edit:
+            answer_edit.setPlainText(self._render_ai_session_text(session))
+
     def _ask_ai(self) -> None:
-        if not self._ask_ai_mode:
+        if not self._ask_ai_mode or not self._current_ai_session_id:
             return
-        prompt = self.content_edit.toPlainText().strip()
+        session = self._ai_sessions.get(self._current_ai_session_id)
+        if session is None:
+            return
+        # 使用当前标签页的内容编辑器
+        content_edit = self._get_ai_tab_content_edit(self._current_ai_session_id)
+        if content_edit is None:
+            return
+        prompt = content_edit.toPlainText().strip()
         model = self.model_combo.currentText().strip() or DEFAULT_SILICONFLOW_MODEL
         if not prompt:
             self.status.showMessage("请输入问题", 2500)
@@ -711,24 +802,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.showMessage("未配置 SiliconFlow API Key", 5000)
             return
 
+        self._ai_request_seq += 1
+        request_id = self._ai_request_seq
+        self._active_ai_request_id = request_id
+        session.in_flight = True
+        session.streaming_text = ""
+        session.draft_prompt = prompt
         self.btn_ai_ask.setEnabled(False)
         self.btn_ai_ask.setText("请求中...")
         self._ai_input_tokens = self._estimate_tokens(prompt)
         self._ai_output_tokens = 0
         self._ai_stream_text = ""
-        self.ai_answer_edit.clear()
+        # 更新标签页的回答显示
+        answer_edit = self._get_ai_tab_answer_edit(self._current_ai_session_id)
+        if answer_edit:
+            answer_edit.setPlainText(self._render_ai_session_text(session))
         self._update_token_labels()
         self.status.showMessage(f"正在请求模型：{model}", 2500)
-        self.append_log(f"问AI请求已发送，模型：{model}")
+        self.append_log(f"问AI请求已发送，模型：{model}，会话：{session.title}")
 
         def _worker() -> None:
+            history = session.messages[-20:] if session.messages else []
             payload = {
                 "model": model,
                 "stream": True,
                 "messages": [
                     {"role": "system", "content": "你是一个简洁、可靠的中文助手。"},
-                    {"role": "user", "content": prompt},
-                ],
+                ] + history + [{"role": "user", "content": prompt}],
             }
             req = urllib.request.Request(
                 SILICONFLOW_URL,
@@ -757,16 +857,22 @@ class MainWindow(QtWidgets.QMainWindow):
                         chunk = str(delta.get("content", ""))
                         if chunk:
                             chunks.append(chunk)
-                            self._ai_bridge.chunk.emit(chunk)
+                            self._ai_bridge.chunk.emit(request_id, session.session_id, chunk)
                     content = "".join(chunks).strip()
                 if not content:
                     content = "[接口返回为空]"
-                self._ai_bridge.finished.emit(True, content)
+                self._ai_bridge.finished.emit(request_id, session.session_id, True, content, prompt)
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else str(exc)
-                self._ai_bridge.finished.emit(False, f"HTTPError {exc.code}: {body}")
+                self._ai_bridge.finished.emit(
+                    request_id,
+                    session.session_id,
+                    False,
+                    f"HTTPError {exc.code}: {body}",
+                    prompt,
+                )
             except Exception as exc:
-                self._ai_bridge.finished.emit(False, repr(exc))
+                self._ai_bridge.finished.emit(request_id, session.session_id, False, repr(exc), prompt)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -781,7 +887,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_realtime_token_stats(self) -> None:
         if not self._ask_ai_mode:
             return
-        self._ai_input_tokens = self._estimate_tokens(self.content_edit.toPlainText())
+        # 使用当前标签页的内容编辑器
+        content_edit = self._get_ai_tab_content_edit(self._current_ai_session_id)
+        if content_edit is None:
+            return
+        if self._current_ai_session_id and self._current_ai_session_id in self._ai_sessions:
+            self._ai_sessions[self._current_ai_session_id].draft_prompt = content_edit.toPlainText()
+        self._ai_input_tokens = self._estimate_tokens(content_edit.toPlainText())
         self._update_token_labels()
 
     def _current_model_price(self) -> ModelPrice | None:
@@ -972,32 +1084,70 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(f"已从硅基官网读取价格：{len(self._model_prices)} 个")
         self._update_token_labels()
 
-    def _on_ai_finished(self, ok: bool, message: str) -> None:
-        self.btn_ai_ask.setEnabled(True)
-        self.btn_ai_ask.setText("问AI")
-        prefix = "AI回答" if ok else "问AI失败"
-        if ok and self._ai_stream_text:
-            self.status.showMessage(prefix, 3500)
-            self.append_log(prefix)
+    def _on_ai_finished(self, request_id: int, session_id: str, ok: bool, message: str, prompt: str) -> None:
+        session = self._ai_sessions.get(session_id)
+        if session is None:
             return
-        self.ai_answer_edit.setPlainText(f"{prefix}:\n{message}")
+        session.in_flight = False
+        if request_id == self._active_ai_request_id:
+            self._active_ai_request_id = None
+        if self._current_ai_session_id == session_id:
+            self.btn_ai_ask.setEnabled(True)
+            self.btn_ai_ask.setText("问AI")
+        prefix = "AI回答" if ok else "问AI失败"
         if ok:
+            session.messages.append({"role": "user", "content": prompt})
+            session.messages.append({"role": "assistant", "content": message})
+            session.draft_prompt = ""
+            session.streaming_text = ""
             self._ai_output_tokens = self._estimate_tokens(message)
+            if self._current_ai_session_id == session_id:
+                # 清空当前标签页的内容编辑器
+                content_edit = self._get_ai_tab_content_edit(session_id)
+                if content_edit:
+                    content_edit.blockSignals(True)
+                    content_edit.clear()
+                    content_edit.blockSignals(False)
+                # 更新回答显示
+                answer_edit = self._get_ai_tab_answer_edit(session_id)
+                if answer_edit:
+                    answer_edit.setPlainText(self._render_ai_session_text(session))
+        else:
+            session.streaming_text = f"{prefix}:\n{message}"
+            if self._current_ai_session_id == session_id:
+                answer_edit = self._get_ai_tab_answer_edit(session_id)
+                if answer_edit:
+                    answer_edit.setPlainText(self._render_ai_session_text(session))
         self._update_token_labels()
         self.status.showMessage(prefix, 3500)
-        self.append_log(prefix)
+        self.append_log(f"{prefix}（{session.title}）")
+        self._save_settings()
 
-    def _on_ai_chunk(self, chunk: str) -> None:
-        self._ai_stream_text += chunk
-        self._ai_output_tokens = self._estimate_tokens(self._ai_stream_text)
-        self.ai_answer_edit.setPlainText(f"AI回答:\n{self._ai_stream_text}")
-        cursor = self.ai_answer_edit.textCursor()
-        cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
-        self.ai_answer_edit.setTextCursor(cursor)
-        self._update_token_labels()
+    def _on_ai_chunk(self, request_id: int, session_id: str, chunk: str) -> None:
+        if request_id != self._active_ai_request_id:
+            return
+        session = self._ai_sessions.get(session_id)
+        if session is None:
+            return
+        session.streaming_text += chunk
+        if self._current_ai_session_id == session_id:
+            self._ai_stream_text = session.streaming_text
+            self._ai_output_tokens = self._estimate_tokens(session.streaming_text)
+            # 使用标签页的回答编辑器
+            answer_edit = self._get_ai_tab_answer_edit(session_id)
+            if answer_edit:
+                answer_edit.setPlainText(self._render_ai_session_text(session))
+                cursor = answer_edit.textCursor()
+                cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+                answer_edit.setTextCursor(cursor)
+            self._update_token_labels()
 
     def _set_editor(self, note: NoteDto | None) -> None:
         self._ask_ai_mode = False
+        self._current_ai_session_id = None
+        # 切换到普通笔记模式：隐藏 ai_tabs，显示普通编辑器
+        self.ai_tabs.hide()
+        self.content_edit.show()
         self.ai_answer_edit.hide()
         self.ai_answer_edit.clear()
         self.btn_ai_ask.setEnabled(False)
@@ -1008,11 +1158,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.content_edit.blockSignals(True)
         if note is None:
             self.title_edit.setText("")
-            self.content_edit.setPlainText("")
+            self.content_edit.clear()
             self.state.current_note_id = None
         else:
             self.title_edit.setText(note.title)
-            self.content_edit.setPlainText(note.content)
+            self._set_content_html(note.content)
             self.state.current_note_id = note.id
         self.title_edit.blockSignals(False)
         self.content_edit.blockSignals(False)
@@ -1021,6 +1171,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_token_labels()
 
     def _mark_dirty(self) -> None:
+        if self._ask_ai_mode:
+            self._update_realtime_token_stats()
+            return
         if not self.state.dirty:
             self.state.dirty = True
             self._update_title()
@@ -1062,7 +1215,166 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._set_text_font_size(self._text_font_size + step)
                     event.accept()
                 return True
+        # 图片粘贴：拦截 content_edit 的 Ctrl+V
+        if (
+            watched is self.content_edit
+            and event.type() == QtCore.QEvent.Type.KeyPress
+            and event.matches(QtGui.QKeySequence.StandardKey.Paste)
+        ):
+            clipboard = QtWidgets.QApplication.clipboard()
+            mime = clipboard.mimeData()
+            if mime and mime.hasImage():
+                img = QtGui.QImage(mime.imageData())
+                if not img.isNull():
+                    self._paste_image_to_editor(self.content_edit, img)
+                    return True
+            if mime and mime.hasUrls():
+                handled = False
+                for url in mime.urls():
+                    path = url.toLocalFile()
+                    if path and self._is_image_file(path):
+                        self._insert_image_file_to_editor(self.content_edit, path)
+                        handled = True
+                if handled:
+                    return True
+        # 图片拖拽到 content_edit
+        if watched is self.content_edit.viewport():
+            if event.type() == QtCore.QEvent.Type.DragEnter:
+                mime = event.mimeData()
+                if mime and (mime.hasImage() or self._mime_has_image_urls(mime)):
+                    event.acceptProposedAction()
+                    return True
+            if event.type() == QtCore.QEvent.Type.Drop:
+                mime = event.mimeData()
+                if mime and mime.hasImage():
+                    img = QtGui.QImage(mime.imageData())
+                    if not img.isNull():
+                        self._paste_image_to_editor(self.content_edit, img)
+                        return True
+                if mime and mime.hasUrls():
+                    handled = False
+                    for url in mime.urls():
+                        path = url.toLocalFile()
+                        if path and self._is_image_file(path):
+                            self._insert_image_file_to_editor(self.content_edit, path)
+                            handled = True
+                    if handled:
+                        return True
         return super().eventFilter(watched, event)
+
+    # ── 图片辅助方法 ──────────────────────────────────────────────
+
+    @staticmethod
+    def _is_image_file(path: str) -> bool:
+        return Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"}
+
+    @staticmethod
+    def _mime_has_image_urls(mime) -> bool:
+        if not mime or not mime.hasUrls():
+            return False
+        for url in mime.urls():
+            p = url.toLocalFile()
+            if p and Path(p).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"}:
+                return True
+        return False
+
+    def _images_dir(self) -> Path:
+        root = Path(__file__).resolve().parent / "notepad_list" / "_images"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _save_image(self, img: QtGui.QImage, ext: str = "png") -> str | None:
+        images_dir = self._images_dir()
+        name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.{ext}"
+        save_path = images_dir / name
+        if not img.save(str(save_path)):
+            self.append_log(f"图片保存失败：{save_path}")
+            return None
+        self.append_log(f"图片已保存：{save_path.name}")
+        return str(save_path)
+
+    def _paste_image_to_editor(self, editor: QtWidgets.QTextEdit, img: QtGui.QImage) -> None:
+        saved = self._save_image(img)
+        if not saved:
+            return
+        self._do_insert_image(editor, saved)
+
+    def _insert_image_file_to_editor(self, editor: QtWidgets.QTextEdit, file_path: str) -> None:
+        import shutil
+        src = Path(file_path)
+        if not src.is_file():
+            return
+        images_dir = self._images_dir()
+        name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{src.suffix}"
+        dest = images_dir / name
+        try:
+            shutil.copy2(str(src), str(dest))
+        except Exception as exc:
+            self.append_log(f"复制图片失败：{exc}")
+            return
+        self.append_log(f"图片已复制：{dest.name}")
+        self._do_insert_image(editor, str(dest))
+
+    def _do_insert_image(self, editor: QtWidgets.QTextEdit, abs_path: str) -> None:
+        url = QtCore.QUrl.fromLocalFile(abs_path)
+        doc = editor.document()
+        doc.addResource(
+            QtGui.QTextDocument.ResourceType.ImageResource,
+            url,
+            QtGui.QImage(abs_path),
+        )
+        cursor = editor.textCursor()
+        img_fmt = QtGui.QTextImageFormat()
+        img_fmt.setName(url.toString())
+        # 限制图片最大宽度为编辑器宽度的 90%
+        source_img = QtGui.QImage(abs_path)
+        if not source_img.isNull():
+            max_w = editor.viewport().width() * 0.9
+            if source_img.width() > max_w:
+                img_fmt.setWidth(max_w)
+                img_fmt.setHeight(source_img.height() * max_w / source_img.width())
+        cursor.insertImage(img_fmt)
+        cursor.insertText("\n")
+        editor.setTextCursor(cursor)
+        self._mark_dirty()
+
+    def _get_content_html(self) -> str:
+        return self.content_edit.toHtml()
+
+    def _set_content_html(self, content: str) -> None:
+        if self._looks_like_html(content):
+            self.content_edit.setHtml(content)
+            self._reload_local_images(self.content_edit)
+        else:
+            self.content_edit.setPlainText(content)
+
+    @staticmethod
+    def _looks_like_html(text: str) -> bool:
+        s = (text or "").strip()
+        return s.startswith("<!DOCTYPE") or s.startswith("<html") or "<img " in s[:2000]
+
+    def _reload_local_images(self, editor: QtWidgets.QTextEdit) -> None:
+        doc = editor.document()
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    fmt = frag.charFormat()
+                    if fmt.isImageFormat():
+                        img_fmt = fmt.toImageFormat()
+                        name = img_fmt.name()
+                        url = QtCore.QUrl(name)
+                        local = url.toLocalFile() if url.isLocalFile() else name
+                        if local and Path(local).is_file():
+                            doc.addResource(
+                                QtGui.QTextDocument.ResourceType.ImageResource,
+                                url,
+                                QtGui.QImage(local),
+                            )
+                it += 1
+            block = block.next()
 
     def _set_text_font_size(self, size: int) -> None:
         size = max(8, min(28, int(size)))
@@ -1082,6 +1394,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_error(self, message: str) -> None:
         QtWidgets.QMessageBox.critical(self, "错误", message)
+
+    def _configure_ctrl_double_interval(self) -> None:
+        current_raw = self._settings.value("hotkey/double_ctrl_max_gap_sec", "0.15")
+        try:
+            current = float(str(current_raw))
+        except Exception:
+            current = 0.15
+        value, ok = QtWidgets.QInputDialog.getDouble(
+            self,
+            "设置 Ctrl 双击间隔",
+            "Ctrl 双击最大间隔（秒）:",
+            current,
+            0.08,
+            1.00,
+            2,
+        )
+        if not ok:
+            return
+        value = max(0.08, min(1.00, float(value)))
+        self._settings.setValue("hotkey/double_ctrl_max_gap_sec", f"{value:.2f}")
+        self._settings.sync()
+        if self._hotkey_interval_callback is not None:
+            try:
+                self._hotkey_interval_callback(value)
+            except Exception as exc:
+                self.append_log(f"更新 Ctrl 双击间隔失败: {exc}")
+        self.status.showMessage(f"Ctrl 双击间隔已设置为 {value:.2f}s", 3000)
+        self.append_log(f"Ctrl 双击间隔已更新: {value:.2f}s")
 
     def _update_title(self) -> None:
         suffix = " *" if self.state.dirty else ""
@@ -1149,6 +1489,8 @@ class MainWindow(QtWidgets.QMainWindow):
         fav_raw = self._settings.value("ui/favorites", "[]")
         last_raw = self._settings.value("ui/last_note_id", "")
         model_raw = self._settings.value("ai/model", DEFAULT_SILICONFLOW_MODEL)
+        ai_sessions_raw = self._settings.value("ai/sessions", "[]")
+        ai_current_raw = self._settings.value("ai/current_session_id", "")
         font_size_raw = self._settings.value("ui/text_font_size", "10")
         try:
             parsed = json.loads(str(fav_raw)) if fav_raw is not None else []
@@ -1161,10 +1503,56 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_open_note_id = None
         model = str(model_raw or "").strip()
         self._selected_ai_model = model or DEFAULT_SILICONFLOW_MODEL
+        self._ai_sessions = {}
+        self._current_ai_session_id = None
+        try:
+            raw_sessions = json.loads(str(ai_sessions_raw)) if ai_sessions_raw is not None else []
+            if isinstance(raw_sessions, list):
+                for item in raw_sessions:
+                    if not isinstance(item, dict):
+                        continue
+                    sid = str(item.get("session_id", "")).strip()
+                    if not sid:
+                        continue
+                    title = str(item.get("title", "")).strip() or f"问AI {sid[-4:]}"
+                    messages = item.get("messages", [])
+                    parsed_messages: list[dict[str, str]] = []
+                    if isinstance(messages, list):
+                        for msg in messages:
+                            if not isinstance(msg, dict):
+                                continue
+                            role = str(msg.get("role", "")).strip()
+                            content = str(msg.get("content", "")).strip()
+                            if role in {"user", "assistant"} and content:
+                                parsed_messages.append({"role": role, "content": content})
+                    draft_prompt = str(item.get("draft_prompt", ""))
+                    self._ai_sessions[sid] = AiSession(
+                        session_id=sid,
+                        title=title,
+                        messages=parsed_messages,
+                        draft_prompt=draft_prompt,
+                    )
+        except Exception:
+            self._ai_sessions = {}
+        cur = str(ai_current_raw or "").strip()
+        if cur and cur in self._ai_sessions:
+            self._current_ai_session_id = cur
         try:
             self._text_font_size = max(8, min(28, int(str(font_size_raw))))
         except Exception:
             self._text_font_size = 10
+
+    def _restore_ai_tabs(self) -> None:
+        """从保存的会话恢复 AI 标签页"""
+        for sess in self._sorted_ai_sessions():
+            self._create_ai_tab(sess)
+        # 如果有当前会话，切换到对应标签页
+        if self._current_ai_session_id:
+            for i in range(self.ai_tabs.count()):
+                widget = self.ai_tabs.widget(i)
+                if widget and widget.property("session_id") == self._current_ai_session_id:
+                    self.ai_tabs.setCurrentIndex(i)
+                    break
 
     def _save_settings(self) -> None:
         try:
@@ -1174,11 +1562,303 @@ class MainWindow(QtWidgets.QMainWindow):
                 "" if self._last_open_note_id is None else str(self._last_open_note_id),
             )
             self._settings.setValue("ai/model", self.model_combo.currentText().strip() or self._selected_ai_model)
+            ai_sessions_data = []
+            for sess in self._sorted_ai_sessions():
+                ai_sessions_data.append(
+                    {
+                        "session_id": sess.session_id,
+                        "title": sess.title,
+                        "messages": sess.messages[-100:],
+                        "draft_prompt": sess.draft_prompt,
+                    }
+                )
+            self._settings.setValue("ai/sessions", json.dumps(ai_sessions_data, ensure_ascii=False))
+            self._settings.setValue("ai/current_session_id", self._current_ai_session_id or "")
             self._settings.setValue("ui/text_font_size", str(self._text_font_size))
             self._settings.setValue("window/geometry", self.saveGeometry())
             self._settings.sync()
         except Exception:
             pass
+
+    def _ensure_ai_session(self, session_id: str | None = None) -> AiSession:
+        if session_id and session_id in self._ai_sessions:
+            return self._ai_sessions[session_id]
+        if self._current_ai_session_id and self._current_ai_session_id in self._ai_sessions:
+            return self._ai_sessions[self._current_ai_session_id]
+        return self._new_ai_session(select=True)
+
+    def _new_ai_session(self, select: bool = True) -> AiSession:
+        sid = str(QtCore.QDateTime.currentMSecsSinceEpoch())
+        title = f"问AI {len(self._ai_sessions) + 1}"
+        sess = AiSession(session_id=sid, title=title, messages=[])
+        self._ai_sessions[sid] = sess
+        if select:
+            self._current_ai_session_id = sid
+        # 创建标签页
+        self._create_ai_tab(sess)
+        self._save_settings()
+        return sess
+
+    def _create_ai_tab(self, session: AiSession) -> None:
+        """为 AI 会话创建一个标签页（从 .ui 模板克隆）"""
+        # 获取模板 widget（第0个标签页）
+        template_widget = self.ai_tabs.widget(0)
+        if template_widget is None:
+            # 回退：如果模板不存在，动态创建
+            tab_widget = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab_widget)
+            tab_layout.setSpacing(10)
+            tab_layout.setContentsMargins(10, 10, 10, 10)
+            content_edit = QtWidgets.QTextEdit()
+            content_edit.setObjectName("CodeEditor")
+            content_edit.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+            content_edit.setPlaceholderText('在这里输入问题，然后点击"问AI"。\n\n支持多会话与上下文记忆。\n模型：千问 / SiliconFlow。')
+            ai_answer_edit = QtWidgets.QTextEdit()
+            ai_answer_edit.setObjectName("AiAnswerViewer")
+            ai_answer_edit.setReadOnly(True)
+            ai_answer_edit.setPlaceholderText("AI 回答会显示在这里（支持多会话上下文）")
+            tab_layout.addWidget(content_edit, 1)
+            tab_layout.addWidget(ai_answer_edit, 2)
+        else:
+            # 克隆模板
+            tab_widget = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab_widget)
+            tab_layout.setSpacing(10)
+            tab_layout.setContentsMargins(10, 10, 10, 10)
+
+            # 克隆输入框
+            template_content = template_widget.findChild(QtWidgets.QTextEdit, "ai_tab_content_edit_template")
+            content_edit = QtWidgets.QTextEdit()
+            content_edit.setObjectName("CodeEditor")
+            content_edit.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+            if template_content:
+                content_edit.setPlaceholderText(template_content.placeholderText())
+            else:
+                content_edit.setPlaceholderText('在这里输入问题，然后点击"问AI"。\n\n支持多会话与上下文记忆。\n模型：千问 / SiliconFlow。')
+
+            # 克隆回答框
+            template_answer = template_widget.findChild(QtWidgets.QTextEdit, "ai_tab_answer_edit_template")
+            ai_answer_edit = QtWidgets.QTextEdit()
+            ai_answer_edit.setObjectName("AiAnswerViewer")
+            ai_answer_edit.setReadOnly(True)
+            if template_answer:
+                ai_answer_edit.setPlaceholderText(template_answer.placeholderText())
+            else:
+                ai_answer_edit.setPlaceholderText("AI 回答会显示在这里（支持多会话上下文）")
+
+            # 添加到布局（比例 1:2）
+            tab_layout.addWidget(content_edit, 1)
+            tab_layout.addWidget(ai_answer_edit, 2)
+
+        # 存储 session_id 到 widget
+        tab_widget.setProperty("session_id", session.session_id)
+        tab_widget.setProperty("content_edit", content_edit)
+        tab_widget.setProperty("ai_answer_edit", ai_answer_edit)
+
+        # 连接文本变化信号
+        content_edit.textChanged.connect(lambda: self._on_ai_tab_text_changed(session.session_id))
+
+        # 添加到标签页
+        index = self.ai_tabs.addTab(tab_widget, session.title)
+        self.ai_tabs.setCurrentIndex(index)
+
+        # 为新标签设置关闭按钮
+        self._setup_ai_tab_close_button(index)
+
+    def _setup_ai_tab_close_button(self, index: int) -> None:
+        """为指定索引的AI标签页设置关闭按钮"""
+        tab_bar = self.ai_tabs.tabBar()
+        if index < 0 or index >= tab_bar.count():
+            return
+        # 创建自定义关闭按钮（样式从 style.qss 加载）
+        close_btn = QtWidgets.QPushButton("×", tab_bar)
+        close_btn.setToolTip("关闭标签")
+        # 连接到关闭槽
+        def make_handler(idx: int):
+            def handler():
+                self._on_ai_tab_close_requested(idx)
+            return handler
+        close_btn.clicked.connect(make_handler(index))
+        # 设置为标签的右按钮
+        tab_bar.setTabButton(index, QtWidgets.QTabBar.ButtonPosition.RightSide, close_btn)
+
+    def _on_ai_tab_text_changed(self, session_id: str) -> None:
+        """AI 标签页文本变化时更新统计"""
+        if session_id == self._current_ai_session_id:
+            self._update_realtime_token_stats()
+
+    def _get_current_ai_tab_widget(self) -> QtWidgets.QWidget | None:
+        """获取当前 AI 标签页的 widget"""
+        if self.ai_tabs.count() == 0:
+            return None
+        return self.ai_tabs.currentWidget()
+
+    def _get_ai_tab_content_edit(self, session_id: str | None = None) -> QtWidgets.QTextEdit | None:
+        """获取指定会话的内容编辑器，如果不指定则获取当前标签页的"""
+        if session_id is None:
+            widget = self._get_current_ai_tab_widget()
+            if widget:
+                return widget.property("content_edit")
+            return None
+        # 查找指定 session_id 的标签页
+        for i in range(self.ai_tabs.count()):
+            widget = self.ai_tabs.widget(i)
+            if widget and widget.property("session_id") == session_id:
+                return widget.property("content_edit")
+        return None
+
+    def _get_ai_tab_answer_edit(self, session_id: str | None = None) -> QtWidgets.QTextEdit | None:
+        """获取指定会话的回答编辑器，如果不指定则获取当前标签页的"""
+        if session_id is None:
+            widget = self._get_current_ai_tab_widget()
+            if widget:
+                return widget.property("ai_answer_edit")
+            return None
+        # 查找指定 session_id 的标签页
+        for i in range(self.ai_tabs.count()):
+            widget = self.ai_tabs.widget(i)
+            if widget and widget.property("session_id") == session_id:
+                return widget.property("ai_answer_edit")
+        return None
+
+    def _sorted_ai_sessions(self) -> list[AiSession]:
+        return sorted(
+            self._ai_sessions.values(),
+            key=lambda s: int(s.session_id) if s.session_id.isdigit() else 0,
+            reverse=True,
+        )
+
+    def _on_ai_tab_close_requested(self, index: int) -> None:
+        """关闭 AI 标签页"""
+        widget = self.ai_tabs.widget(index)
+        if widget is None:
+            return
+        session_id = widget.property("session_id")
+        if session_id and session_id in self._ai_sessions:
+            del self._ai_sessions[session_id]
+        self.ai_tabs.removeTab(index)
+        widget.deleteLater()
+        # 如果所有标签都关闭了，退出 AI 模式
+        if self.ai_tabs.count() == 0:
+            self._ask_ai_mode = False
+            self._current_ai_session_id = None
+            self.ai_tabs.hide()
+            self.content_edit.show()
+            self.ai_answer_edit.hide()
+            self._set_editor(None)
+        self._save_settings()
+
+    def _on_ai_tabs_context_menu(self, pos: QtCore.QPoint) -> None:
+        """AI标签栏右键菜单"""
+        # 获取点击位置对应的标签索引
+        tab_bar = self.ai_tabs.tabBar()
+        tab_index = tab_bar.tabAt(pos)
+
+        if tab_index < 0:
+            return
+
+        # 切换到点击的标签
+        self.ai_tabs.setCurrentIndex(tab_index)
+
+        menu = QtWidgets.QMenu(self)
+
+        # 关闭其他标签
+        action_close_others = menu.addAction("关闭其他标签")
+        action_close_others.triggered.connect(lambda: self._close_other_ai_tabs_except(tab_index))
+
+        # 关闭当前标签
+        action_close_current = menu.addAction("关闭当前标签")
+        action_close_current.triggered.connect(lambda: self._on_ai_tab_close_requested(tab_index))
+
+        menu.addSeparator()
+
+        # 重命名标签
+        action_rename = menu.addAction("重命名标签")
+        action_rename.triggered.connect(lambda: self._rename_ai_tab(tab_index))
+
+        # 在鼠标位置显示菜单
+        global_pos = self.ai_tabs.mapToGlobal(pos)
+        menu.exec(global_pos)
+
+    def _close_other_ai_tabs_except(self, keep_index: int) -> None:
+        """关闭除指定标签外的所有AI标签"""
+        # 从后往前删除，避免索引变化
+        for i in range(self.ai_tabs.count() - 1, -1, -1):
+            if i != keep_index:
+                self._on_ai_tab_close_requested(i)
+
+    def _rename_ai_tab(self, tab_index: int) -> None:
+        """重命名指定AI标签"""
+        if tab_index < 0:
+            return
+
+        widget = self.ai_tabs.widget(tab_index)
+        if widget is None:
+            return
+
+        session_id = widget.property("session_id")
+        if not session_id or session_id not in self._ai_sessions:
+            return
+
+        session = self._ai_sessions[session_id]
+        new_title, ok = QtWidgets.QInputDialog.getText(
+            self, "重命名标签", "请输入新标签名:",
+            QtWidgets.QLineEdit.EchoMode.Normal,
+            session.title
+        )
+        if ok and new_title.strip():
+            session.title = new_title.strip()
+            self.ai_tabs.setTabText(tab_index, session.title)
+            # 如果重命名的是当前标签，更新标题编辑框
+            if tab_index == self.ai_tabs.currentIndex():
+                self.title_edit.setText(session.title)
+            self._save_settings()
+
+    def _setup_ai_tab_close_buttons(self) -> None:
+        """为所有AI标签页设置关闭按钮图标（X符号）"""
+        tab_bar = self.ai_tabs.tabBar()
+        for i in range(tab_bar.count()):
+            # 创建自定义关闭按钮（样式从 style.qss 加载）
+            close_btn = QtWidgets.QPushButton("×", tab_bar)
+            close_btn.setToolTip("关闭标签")
+            # 连接到关闭槽（使用闭包捕获当前索引）
+            def make_close_handler(index: int):
+                def handler():
+                    self._on_ai_tab_close_requested(index)
+                return handler
+            close_btn.clicked.connect(make_close_handler(i))
+            # 设置为标签的右按钮
+            tab_bar.setTabButton(i, QtWidgets.QTabBar.ButtonPosition.RightSide, close_btn)
+
+    def _on_ai_tab_changed(self, index: int) -> None:
+        """切换 AI 标签页"""
+        if index < 0:
+            return
+        widget = self.ai_tabs.widget(index)
+        if widget is None:
+            return
+        session_id = widget.property("session_id")
+        if session_id and session_id in self._ai_sessions:
+            self._current_ai_session_id = session_id
+            session = self._ai_sessions[session_id]
+            # 更新标题编辑框
+            self.title_edit.blockSignals(True)
+            self.title_edit.setText(session.title)
+            self.title_edit.blockSignals(False)
+            # 更新 token 统计
+            self._update_realtime_token_stats()
+        self._save_settings()
+
+    def _render_ai_session_text(self, session: AiSession) -> str:
+        chunks: list[str] = []
+        if not session.messages and not session.streaming_text:
+            return "AI 回答会显示在这里（支持多会话上下文）"
+        for msg in session.messages:
+            role = "你" if msg.get("role") == "user" else "AI"
+            chunks.append(f"{role}:\n{msg.get('content', '')}\n")
+        if session.streaming_text:
+            chunks.append(f"AI(输出中):\n{session.streaming_text}")
+        return "\n".join(chunks).strip()
 
     def _restore_window_state(self) -> None:
         geo = self._settings.value("window/geometry")
