@@ -20,6 +20,11 @@ from PySide6 import QtCore, QtGui, QtUiTools, QtWidgets
 
 from .api_client import ApiError, NotepadApi, NoteDto
 
+# 从 l_qt_wgt_lib 导入代码编辑器组件
+from l_qt_wgt_lib.smart_widget import (
+    CodeEditorWidget,
+)
+
 
 SILICONFLOW_URL = "https://api.siliconflow.cn/v1/chat/completions"
 SILICONFLOW_MODELS_URL = "https://api.siliconflow.cn/v1/models"
@@ -37,6 +42,9 @@ SILICONFLOW_API_KEY = os.environ.get(
 )
 ASK_AI_ITEM_ID = "__ask_ai__"
 ASK_AI_SESSION_PREFIX = "__ask_ai_session__:"
+EXTERNAL_FILE_PREFIX = "__external_file__:"
+EXTERNAL_FILES_STATE_NAME = "external_files.json"
+LOG_VIEW_CONTENT_CACHE_KEY = "__l_notepad_log_view__"
 _SILICONFLOW_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -53,6 +61,93 @@ def _load_stylesheet() -> str:
     if style_path.exists():
         return style_path.read_text(encoding="utf-8")
     return ""
+
+
+_AI_PROMPT_PLACEHOLDER = (
+    '在这里输入问题，然后点击"问AI"。\n\n'
+    "支持多会话与上下文记忆。\n"
+    "模型：千问 / SiliconFlow。"
+)
+_AI_ANSWER_PLACEHOLDER = "AI 回答会显示在这里（支持多会话上下文）"
+
+
+def _is_ai_prompt_placeholder_body(text: str) -> bool:
+    """历史版本曾把提示文案写入文档，与 placeholder 等价时视为空。"""
+    return text.strip() == _AI_PROMPT_PLACEHOLDER.strip()
+
+
+def _set_code_editor_document(editor: CodeEditorWidget, text: str) -> None:
+    """写入正文；空字符串时清空文档以显示 placeholder（勿把提示文案 setPlainText）。"""
+    if text:
+        editor.setPlainText(text)
+    else:
+        editor.clear()
+
+
+def _plain_text_line_wrap_mode(mode) -> QtWidgets.QPlainTextEdit.LineWrapMode:
+    """QTextEdit.LineWrapMode 与 QPlainTextEdit.LineWrapMode 在 PySide6 中类型不兼容。"""
+    if isinstance(mode, QtWidgets.QPlainTextEdit.LineWrapMode):
+        return mode
+    plain = QtWidgets.QPlainTextEdit.LineWrapMode
+    text = QtWidgets.QTextEdit.LineWrapMode
+    if mode == text.NoWrap:
+        return plain.NoWrap
+    if mode in (text.WidgetWidth, text.FixedPixelWidth, text.FixedColumnWidth):
+        return plain.WidgetWidth
+    return plain(int(mode))
+
+
+def _apply_text_edit_appearance(
+    editor: CodeEditorWidget,
+    source: QtWidgets.QTextEdit | CodeEditorWidget,
+) -> None:
+    if isinstance(source, CodeEditorWidget):
+        placeholder = source.placeholderText()
+        wrap_mode = source.lineWrapMode()
+        read_only = source.isReadOnly()
+        accept_drops = source.editor().acceptDrops()
+    else:
+        placeholder = source.placeholderText()
+        wrap_mode = source.lineWrapMode()
+        read_only = source.isReadOnly()
+        accept_drops = source.acceptDrops()
+    editor.clear()
+    editor.setLineWrapMode(_plain_text_line_wrap_mode(wrap_mode))
+    editor.setReadOnly(read_only)
+    if accept_drops:
+        editor.setAcceptDrops(True)
+    # 正文为空；placeholder 仅作灰色提示，不写入文档
+    editor.setPlaceholderText(placeholder)
+
+
+def replace_text_edit_with_code_editor(
+    old_widget: QtWidgets.QTextEdit,
+    obj_name: str,
+) -> CodeEditorWidget:
+    """将 .ui 中的 QTextEdit 替换为 CodeEditorWidget（保留布局与外观属性）。"""
+    parent = old_widget.parentWidget()
+    layout = parent.layout() if parent is not None else None
+    new_editor = CodeEditorWidget(parent)
+    new_editor.setObjectName(obj_name)
+    _apply_text_edit_appearance(new_editor, old_widget)
+    if layout is not None:
+        layout.replaceWidget(old_widget, new_editor)
+    old_widget.deleteLater()
+    return new_editor
+
+
+def create_code_editor_widget(
+    parent: QtWidgets.QWidget,
+    obj_name: str,
+    template: QtWidgets.QTextEdit | CodeEditorWidget | None = None,
+) -> CodeEditorWidget:
+    """新建 CodeEditorWidget，可选从模板（QTextEdit 或已替换的 CodeEditorWidget）复制外观。"""
+    editor = CodeEditorWidget(parent)
+    editor.setObjectName(obj_name)
+    editor.clear()
+    if template is not None:
+        _apply_text_edit_appearance(editor, template)
+    return editor
 
 
 @dataclass
@@ -84,180 +179,6 @@ class PriceBridge(QtCore.QObject):
     finished = QtCore.Signal(bool, object)
 
 
-class _LineNumberArea(QtWidgets.QWidget):
-    """Side widget that draws line numbers for a LineNumberTextEdit."""
-
-    def __init__(self, editor: "LineNumberTextEdit") -> None:
-        super().__init__(editor)
-        self._editor = editor
-
-    def sizeHint(self) -> QtCore.QSize:
-        return QtCore.QSize(self._editor.line_number_area_width(), 0)
-
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        self._editor.line_number_area_paint(event)
-
-
-class LineNumberTextEdit(QtWidgets.QTextEdit):
-    """QTextEdit with a line-number gutter on the left side."""
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
-        self.setAcceptDrops(True)
-        self._line_number_area = _LineNumberArea(self)
-        self._line_bg = QtGui.QColor("#0B1020")
-        self._line_fg = QtGui.QColor("#4B5563")
-        self._line_fg_current = QtGui.QColor("#89DDFF")
-        self.document().blockCountChanged.connect(self._update_line_number_area_width)
-        self.verticalScrollBar().valueChanged.connect(self._line_number_area.update)
-        self.textChanged.connect(self._line_number_area.update)
-        self.cursorPositionChanged.connect(self._line_number_area.update)
-        self._update_line_number_area_width()
-
-    def line_number_area_width(self) -> int:
-        digits = max(2, len(str(max(1, self.document().blockCount()))))
-        fm = self.fontMetrics()
-        return 10 + fm.horizontalAdvance("9") * digits + 6
-
-    def _update_line_number_area_width(self) -> None:
-        w = self.line_number_area_width()
-        self.setViewportMargins(w, 0, 0, 0)
-        self._line_number_area.setGeometry(
-            QtCore.QRect(0, 0, w, self.viewport().height())
-        )
-
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        cr = self.contentsRect()
-        w = self.line_number_area_width()
-        self._line_number_area.setGeometry(
-            QtCore.QRect(cr.left(), cr.top(), w, cr.height())
-        )
-
-    def line_number_area_paint(self, event) -> None:
-        painter = QtGui.QPainter(self._line_number_area)
-        painter.fillRect(event.rect(), self._line_bg)
-
-        block = self.document().begin()
-        block_num = 1
-        top_offset = self.verticalScrollBar().value()
-        current_block_num = self.textCursor().blockNumber() + 1
-
-        while block.isValid():
-            layout = block.layout()
-            if layout is None:
-                block = block.next()
-                block_num += 1
-                continue
-            block_top = layout.position().y() - top_offset + self.contentsMargins().top()
-            block_height = layout.boundingRect().height()
-            if block_top > event.rect().bottom():
-                break
-            if block_top + block_height >= event.rect().top():
-                if block_num == current_block_num:
-                    painter.setPen(self._line_fg_current)
-                else:
-                    painter.setPen(self._line_fg)
-                painter.setFont(self.font())
-                paint_rect = QtCore.QRectF(
-                    0, block_top, self._line_number_area.width() - 6, block_height
-                )
-                painter.drawText(
-                    paint_rect,
-                    QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignTop,
-                    str(block_num),
-                )
-            block = block.next()
-            block_num += 1
-        painter.end()
-
-    def changeEvent(self, event) -> None:  # type: ignore[override]
-        super().changeEvent(event)
-        if event.type() == QtCore.QEvent.Type.FontChange:
-            self._update_line_number_area_width()
-
-    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
-        menu = self.createStandardContextMenu()
-        # 检测右键位置是否有图片
-        cursor = self.cursorForPosition(event.pos())
-        fmt = cursor.charFormat()
-        if fmt.isImageFormat():
-            img_name = fmt.toImageFormat().name()
-            url = QtCore.QUrl(img_name)
-            local_path = url.toLocalFile() if url.isLocalFile() else img_name
-            if local_path and Path(local_path).is_file():
-                menu.addSeparator()
-                act_edit = menu.addAction("用画图编辑图片")
-                act_open_folder = menu.addAction("在资源管理器中显示")
-                act_edit.triggered.connect(
-                    lambda _=False, p=local_path: subprocess.Popen(
-                        ["mspaint", p], creationflags=0x00000008  # DETACHED_PROCESS
-                    )
-                )
-                act_open_folder.triggered.connect(
-                    lambda _=False, p=local_path: subprocess.Popen(
-                        ["explorer", "/select,", p.replace("/", "\\")]
-                    )
-                )
-        menu.exec(event.globalPos())
-
-
-class TerminalCodeHighlighter(QtGui.QSyntaxHighlighter):
-    """Terminal-inspired highlighting for Python/log snippets."""
-
-    def __init__(self, document: QtGui.QTextDocument) -> None:
-        super().__init__(document)
-        self._rules = [
-            (r"\b(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\b", self._fmt("#FF5C8A", bold=True)),
-            (r"\[[0-9]{2}:[0-9]{2}:[0-9]{2}\]", self._fmt("#8BE9FD")),
-            (r"\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]*\]", self._fmt("#B6E880")),
-            (r"\[arg[0-9]+\]", self._fmt("#BD93F9", bold=True)),
-            (r"\b(File|Traceback|Exception|Error)\b", self._fmt("#FF6B6B", bold=True)),
-            (r"\b(fn|def|class|return|if|else|elif|for|while|try|except|with|as|import|from|in|is|not|and|or|None|True|False)\b", self._fmt("#82AAFF")),
-            (r"\b[A-Za-z_][A-Za-z0-9_]*(?=\()", self._fmt("#7FDBCA")),
-            (r"\b\d+(?:\.\d+)?\b", self._fmt("#F78C6C")),
-            (r"(?<!\w)[A-Za-z]:[\\/][^\s,\)\]]+", self._fmt("#C3E88D")),
-            (r"(?<!\w)/(?:[^\s,\)\]]+/)+[^\s,\)\]]+", self._fmt("#C3E88D")),
-            (r"@[A-Za-z_][A-Za-z0-9_]*", self._fmt("#FFCB6B")),
-            (r"#[^\n]*", self._fmt("#637777", italic=True)),
-        ]
-        self._string_rules = [
-            (r'"(?:\\.|[^"\\])*"', self._fmt("#ECC48D")),
-            (r"'(?:\\.|[^'\\])*'", self._fmt("#ECC48D")),
-        ]
-        self._bracket_format = self._fmt("#89DDFF")
-
-    @staticmethod
-    def _fmt(color: str, *, bold: bool = False, italic: bool = False) -> QtGui.QTextCharFormat:
-        fmt = QtGui.QTextCharFormat()
-        fmt.setForeground(QtGui.QColor(color))
-        if bold:
-            fmt.setFontWeight(QtGui.QFont.Weight.Bold)
-        if italic:
-            fmt.setFontItalic(True)
-        return fmt
-
-    def highlightBlock(self, text: str) -> None:  # type: ignore[override]
-        for pattern, fmt in self._rules:
-            self._apply_regex(pattern, text, fmt)
-        for pattern, fmt in self._string_rules:
-            self._apply_regex(pattern, text, fmt)
-        for idx, ch in enumerate(text):
-            if ch in "{}[]()":
-                self.setFormat(idx, 1, self._bracket_format)
-
-    def _apply_regex(self, pattern: str, text: str, fmt: QtGui.QTextCharFormat) -> None:
-        expr = QtCore.QRegularExpression(pattern)
-        match = expr.match(text)
-        while match.hasMatch():
-            start = match.capturedStart()
-            length = match.capturedLength()
-            if start >= 0 and length > 0:
-                self.setFormat(start, length, fmt)
-            match = expr.match(text, start + max(length, 1))
-
-
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, api: NotepadApi, restart_callback=None, hotkey_interval_callback=None) -> None:
         super().__init__()
@@ -276,11 +197,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ai_stream_text = ""
         self._text_font_size = 10
         self._ask_ai_mode = False
+        self._external_files: list[str] = []
+        self._current_external_file: str | None = None
         self._ai_sessions: dict[str, AiSession] = {}
         self._current_ai_session_id: str | None = None
         self._ai_request_seq = 0
         self._active_ai_request_id: int | None = None
         self._in_selection_changed = False
+        self._initializing = True
+        self._tray_icon: QtWidgets.QSystemTrayIcon | None = None
         self._ai_bridge = AiBridge()
         self._ai_bridge.chunk.connect(self._on_ai_chunk)
         self._ai_bridge.finished.connect(self._on_ai_finished)
@@ -295,6 +220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if icon_path.exists():
             self.setWindowIcon(QtGui.QIcon(str(icon_path)))
         self._load_settings()
+        self._load_external_files_state()
         self._restore_window_state()
 
         ui_path = Path(__file__).resolve().parent / "main_window.ui"
@@ -320,6 +246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_output_tokens = self.findChild(QtWidgets.QLabel, "label_output_tokens")
         self.label_cost = self.findChild(QtWidgets.QLabel, "label_cost")
         self.label_price_source = self.findChild(QtWidgets.QLabel, "label_price_source")
+        self.tab_count = self.findChild(QtWidgets.QLabel, "tab_count")
         self.content_edit = self.findChild(QtWidgets.QTextEdit, "content_edit")
         self.ai_answer_edit = self.findChild(QtWidgets.QTextEdit, "ai_answer_edit")
         self.ai_tabs = self.findChild(QtWidgets.QTabWidget, "ai_tabs")
@@ -332,6 +259,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_restart = self.findChild(QtWidgets.QPushButton, "btn_restart")
         self.btn_ctrl_interval = self.findChild(QtWidgets.QPushButton, "btn_ctrl_interval")
         self.log_view = self.findChild(QtWidgets.QTextEdit, "log_view")
+        self.help_view = self.findChild(QtWidgets.QTextEdit, "help_view")
         splitter = self.findChild(QtWidgets.QSplitter, "splitter_main")
         if splitter is not None:
             splitter.setStretchFactor(0, 0)
@@ -348,6 +276,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_output_tokens,
             self.label_cost,
             self.label_price_source,
+            self.tab_count,
             self.content_edit,
             self.ai_answer_edit,
             self.btn_new,
@@ -363,19 +292,36 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         if any(w is None for w in required_widgets):
             raise RuntimeError("main_window.ui missing required widget objectName(s)")
+        assert self.tab_count is not None
+        self.tab_count.setText("Tab: 0")
 
-        # 用带行号的 LineNumberTextEdit 替换 .ui 加载的普通 QTextEdit
-        old_content_edit = self.content_edit
-        parent_layout = old_content_edit.parentWidget().layout() if old_content_edit.parentWidget() else None
-        new_content_edit = LineNumberTextEdit(old_content_edit.parentWidget())
-        new_content_edit.setObjectName("CodeEditor")
-        if parent_layout is not None:
-            idx = parent_layout.indexOf(old_content_edit)
-            parent_layout.removeWidget(old_content_edit)
-            old_content_edit.hide()
-            old_content_edit.deleteLater()
-            parent_layout.insertWidget(idx, new_content_edit)
-        self.content_edit = new_content_edit
+        # 用 CodeEditorWidget 替换 .ui 中的 QTextEdit（笔记区 / 旧版 AI 回答区 / 日志）
+        self.content_edit = replace_text_edit_with_code_editor(self.content_edit, "CodeEditor")
+        self.ai_answer_edit = replace_text_edit_with_code_editor(self.ai_answer_edit, "AiAnswerViewer")
+        self.log_view = replace_text_edit_with_code_editor(self.log_view, "LogViewer")
+        if self.help_view is not None:
+            self.help_view = replace_text_edit_with_code_editor(self.help_view, "HelpViewer")
+            self.help_view.setReadOnly(True)
+            self._load_help_page()
+        assert self.ai_tabs is not None
+        self._ai_tab_template_widget = self.ai_tabs.widget(0)
+        self._ai_template_content_edit: CodeEditorWidget | None = None
+        self._ai_template_answer_edit: CodeEditorWidget | None = None
+        if self._ai_tab_template_widget is not None:
+            template_code = self._ai_tab_template_widget.findChild(QtWidgets.QTextEdit, "CodeEditor")
+            if template_code is not None:
+                self._ai_template_content_edit = replace_text_edit_with_code_editor(
+                    template_code, "CodeEditor"
+                )
+            template_answer = self._ai_tab_template_widget.findChild(
+                QtWidgets.QTextEdit, "AiAnswerViewer"
+            )
+            if template_answer is not None:
+                self._ai_template_answer_edit = replace_text_edit_with_code_editor(
+                    template_answer, "AiAnswerViewer"
+                )
+            self.ai_tabs.removeTab(0)
+            self._ai_tab_template_widget.hide()
 
         # 初始化 .ui 文件中的 "问AI" item data
         if self.notes_list.count() > 0:
@@ -389,6 +335,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 first_item.setSizeHint(QtCore.QSize(0, 36))
 
         self.search_edit.textChanged.connect(self._apply_filter)
+        if self.notes_list:
+            self.notes_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.notes_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.notes_list.itemDoubleClicked.connect(self._rename_note_from_item)
         self.notes_list.model().rowsMoved.connect(self._on_notes_rows_moved)
@@ -402,6 +350,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # 设置关闭按钮图标（X符号）
         self._setup_ai_tab_close_buttons()
 
+        self._tab_log_widget = self.findChild(QtWidgets.QWidget, "tab_log")
+        if self.tabs is not None:
+            self.tabs.currentChanged.connect(self._on_main_tab_changed)
+
         self.title_edit.textEdited.connect(self._mark_dirty)
         self.model_combo.clear()
         self.model_combo.addItems(DEFAULT_MODEL_PRESETS)
@@ -409,18 +361,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.model_combo.currentTextChanged.connect(self._on_ai_model_changed)
         self.btn_refresh_models.clicked.connect(self._refresh_ai_models)
 
-        self.content_edit.textChanged.connect(self._mark_dirty)
-        self.content_edit.textChanged.connect(self._update_realtime_token_stats)
-        self._content_highlighter = TerminalCodeHighlighter(self.content_edit.document())
-
-        self.ai_answer_edit.setObjectName("AiAnswerViewer")
-        self._ai_answer_highlighter = TerminalCodeHighlighter(self.ai_answer_edit.document())
-
+        # 使用 editor() 获取内部 LineNumberTextEdit 连接信号
+        self.content_edit.editor().textChanged.connect(self._mark_dirty)
+        self.content_edit.editor().textChanged.connect(self._update_realtime_token_stats)
+        # 高亮模式选择下拉框
+        self._highlight_mode_combo = QtWidgets.QComboBox()
+        self._highlight_mode_combo.addItems([
+            "普通文本",
+            "Python 代码",
+            "Markdown 源码",
+            "日志文件"
+        ])
+        self._highlight_mode_combo.setCurrentIndex(3)  # 默认日志模式
+        self._highlight_mode_combo.currentTextChanged.connect(self._on_highlight_mode_changed)
+        
+        # 将下拉框添加到工具栏区域（在标题下方）
+        toolbar_layout = QtWidgets.QHBoxLayout()
+        toolbar_layout.addWidget(QtWidgets.QLabel("高亮模式:"))
+        toolbar_layout.addWidget(self._highlight_mode_combo)
+        self.btn_open_external_file = QtWidgets.QPushButton("打开文件")
+        toolbar_layout.addWidget(self.btn_open_external_file)
+        toolbar_layout.addStretch()
+        
+        # 将工具栏布局插入到 content_edit 之前
+        parent_layout = self.content_edit.parent().layout()
+        if parent_layout:
+            parent_layout.insertLayout(0, toolbar_layout)
+        
         self.btn_save.setObjectName("PrimaryButton")
         self.btn_ai_ask.setObjectName("PrimaryButton")
         self.btn_delete.setObjectName("DangerButton")
 
         self.btn_new.clicked.connect(self._new_note)
+        self.btn_open_external_file.clicked.connect(self._open_external_file)
         self.btn_save.clicked.connect(self._save_note)
         self.btn_delete.clicked.connect(self._delete_note)
         self.btn_refresh.clicked.connect(self.refresh_notes)
@@ -430,19 +403,111 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_ctrl_interval.clicked.connect(self._configure_ctrl_double_interval)
 
         self.log_view.setObjectName("LogViewer")
-        self._log_highlighter = TerminalCodeHighlighter(self.log_view.document())
         self._apply_text_font_size()
-        for editor in (self.content_edit, self.ai_answer_edit, self.log_view):
-            editor.installEventFilter(self)
-            editor.viewport().installEventFilter(self)
+        help_targets = (self.help_view,) if self.help_view is not None else ()
+        for editor_widget in (self.content_edit, self.ai_answer_edit, self.log_view, *help_targets):
+            # 使用 editor() 获取内部 LineNumberTextEdit
+            if hasattr(editor_widget, 'editor'):
+                editor = editor_widget.editor()
+                editor.installEventFilter(self)
+                editor.viewport().installEventFilter(self)
 
         self.status = self.statusBar()
+        
+        # 状态栏添加当前高亮模式显示
+        self._highlight_mode_label = QtWidgets.QLabel("高亮: 日志文件")
+        self.status.addPermanentWidget(self._highlight_mode_label)
+        
+        # 应用默认高亮模式（注意：需要在 _highlight_mode_label 创建之后调用）
+        self._on_highlight_mode_changed("日志文件")
+        
         self._refresh_official_prices()
         # 恢复 AI 标签页
         self._restore_ai_tabs()
         self.refresh_notes()
+        self._initializing = False
         self.append_log("日志窗口已初始化")
         QtWidgets.QApplication.instance().aboutToQuit.connect(self._save_settings)
+
+    def _mode_from_filename(self, filename: str) -> str:
+        ext = Path(filename).suffix.lower()
+        ext_mode_map = {
+            ".py": "python",
+            ".md": "markdown",
+            ".mdc": "markdown",
+            ".markdown": "markdown",
+            ".log": "log",
+            ".txt": "text",
+        }
+        return ext_mode_map.get(ext, "text")
+
+    def _note_file_path(self, title: str) -> Path:
+        return Path(__file__).resolve().parent / "notepad_list" / title
+
+    def _on_main_tab_changed(self, index: int) -> None:
+        if index < 0 or self.log_view is None or self._tab_log_widget is None:
+            return
+        if self.tabs.widget(index) is not self._tab_log_widget:
+            return
+        self.log_view.restore_text_from_cache(LOG_VIEW_CONTENT_CACHE_KEY, mode="log")
+
+    def _on_highlight_mode_changed(self, mode_text: str) -> None:
+        """切换内容编辑器的高亮模式。
+        
+        Args:
+            mode_text: 模式名称
+        """
+        mode_map = {
+            "普通文本": "text",
+            "Python 代码": "python",
+            "Markdown 源码": "markdown",
+            "日志文件": "log"
+        }
+        mode = mode_map.get(mode_text, "log")
+        
+        # 使用 CodeEditorWidget 的 set_mode 方法切换模式
+        self.content_edit.set_mode(mode)
+        
+        # 同步设置日志视图为 log 模式
+        self.log_view.set_mode("log")
+        
+        # 更新状态栏
+        self._current_highlight_mode = mode
+        self._highlight_mode_label.setText(f"高亮: {mode_text}")
+        self.status.showMessage(f"已切换到 {mode_text} 模式", 2000)
+
+    def _auto_set_highlight_mode(self, filename: str) -> None:
+        """根据文件扩展名自动设置高亮模式。
+        
+        Args:
+            filename: 文件名
+        """
+        ext = Path(filename).suffix.lower()
+        
+        # 扩展名到模式的映射
+        ext_mode_map = {
+            '.py': ('python', 'Python 代码'),
+            '.md': ('markdown', 'Markdown 源码'),
+            '.mdc': ('markdown', 'Markdown 源码'),
+            '.markdown': ('markdown', 'Markdown 源码'),
+            '.log': ('log', '日志文件'),
+            '.txt': ('text', '普通文本'),
+        }
+        
+        mode, mode_text = ext_mode_map.get(ext, ('text', '普通文本'))
+        
+        # 设置编辑器模式
+        self.content_edit.set_mode(mode)
+        
+        # 更新状态栏显示
+        self._current_highlight_mode = mode
+        self._highlight_mode_label.setText(f"高亮: {mode_text}")
+        
+        # 同步更新下拉框显示
+        if hasattr(self, '_highlight_mode_combo'):
+            index = self._highlight_mode_combo.findText(mode_text)
+            if index >= 0:
+                self._highlight_mode_combo.setCurrentIndex(index)
 
     def refresh_notes(self) -> None:
         try:
@@ -451,8 +516,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_error(str(e))
             return
 
-        current_id = self.state.current_note_id
-        if current_id is None:
+        current_id = None if self._current_external_file else self.state.current_note_id
+        if current_id is None and not self._current_external_file:
             current_id = self._last_open_note_id
         query = self.search_edit.text().strip()
         notes_sorted = self._sort_notes(notes)
@@ -464,6 +529,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.notes_list.takeItem(i)
         # AI sessions 不再显示在左侧列表中，而是在右侧标签页中显示
         for n in notes_sorted:
+            # 跳过问AI相关的笔记，它们只在右侧标签页显示
+            if n.title.startswith("问AI"):
+                continue
             if query and query.lower() not in n.title.lower():
                 continue
             title = f"※ {n.title}" if self._is_favorite(n.id) else n.title
@@ -473,19 +541,40 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setFont(font)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, n.id)
             item.setToolTip(f"#{n.id}  {n.updated_at}")
-            item.setSizeHint(QtCore.QSize(0, 34))
+            item.setSizeHint(QtCore.QSize(0, 40))  # 增加高度以适应两行文本
+            # 禁用文本省略，确保完整显示
+            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self.notes_list.addItem(item)
+        for file_path in self._external_files:
+            path = Path(file_path)
+            if query and query.lower() not in path.name.lower():
+                continue
+            item = QtWidgets.QListWidgetItem(f"↗ {path.name}\n{file_path}")
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, f"{EXTERNAL_FILE_PREFIX}{file_path}")
+            item.setToolTip(file_path)
+            item.setSizeHint(QtCore.QSize(0, 44))
+            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             self.notes_list.addItem(item)
         self.notes_list.blockSignals(False)
 
         # AI 会话不再在列表中显示，只选择问AI按钮（第0行）或笔记
         if self._ask_ai_mode:
             self.notes_list.setCurrentRow(0)  # 选择问AI按钮
+            self._set_ai_editor(self._current_ai_session_id)
         elif current_id is not None:
             self._select_note_id(current_id)
+        elif self._current_external_file:
+            self._select_external_file(self._current_external_file)
         elif self.notes_list.count() > 1:
             self.notes_list.setCurrentRow(1)  # 跳过问AI按钮，选择第一个笔记
         else:
             self._set_editor(None)
+        current_item = self.notes_list.currentItem() if self.notes_list else None
+        if current_item and current_item.data(QtCore.Qt.ItemDataRole.UserRole) == ASK_AI_ITEM_ID:
+            self._set_ai_editor(self._current_ai_session_id)
         self._update_favorite_button_label()
 
     def _apply_filter(self) -> None:
@@ -500,7 +589,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             if isinstance(item_id, str) and item_id.startswith(ASK_AI_SESSION_PREFIX):
                 continue
+            if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
+                continue
             if int(item_id) == int(note_id):
+                self.notes_list.setCurrentRow(i)
+                return
+
+    def _select_external_file(self, file_path: str) -> None:
+        target = f"{EXTERNAL_FILE_PREFIX}{file_path}"
+        for i in range(self.notes_list.count()):
+            item = self.notes_list.item(i)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == target:
                 self.notes_list.setCurrentRow(i)
                 return
 
@@ -525,23 +624,26 @@ class MainWindow(QtWidgets.QMainWindow):
         items = self.notes_list.selectedItems()
         item_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole) if items else None
         if item_id == ASK_AI_ITEM_ID:
-            self._auto_save_note("切换到问AI前")
-            session = self._new_ai_session(select=True)
-            self._set_ai_editor(session.session_id)
-            self.refresh_notes()
+            if not self._initializing and self.state.current_note_id is not None:
+                self._auto_save_note("切换到问AI前", detail_ui=True)
+            self._set_ai_editor(self._current_ai_session_id)
             # AI 会话不再在列表中显示，不需要选择
             return
         # AI 会话不再在列表中，不再处理 ASK_AI_SESSION_PREFIX
 
         if self.state.dirty:
-            self._auto_save_note("切换日志前")
+            self._auto_save_note("切换日志前", detail_ui=True)
 
         if not items:
             self._set_editor(None)
             return
 
         self._ask_ai_mode = False
-        note_id = int(items[0].data(QtCore.Qt.ItemDataRole.UserRole))
+        item_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
+            self._set_external_file_editor(item_id[len(EXTERNAL_FILE_PREFIX):])
+            return
+        note_id = int(item_id)
         try:
             note = self.api.get_note(note_id)
         except ApiError as e:
@@ -572,8 +674,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._ask_ai_mode:
             self._ask_ai()
             return
+        if self._current_external_file:
+            self._save_external_file()
+            return
         title = self.title_edit.text().strip() or "未命名"
-        content = self._get_content_html()
+        content = self._get_content_text()
         try:
             if self.state.current_note_id is None:
                 note = self.api.create_note(title=title, content=content)
@@ -589,19 +694,130 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_notes()
         self._update_title()
 
-    def _auto_save_note(self, reason: str) -> None:
+    @staticmethod
+    def _format_file_size(num_bytes: int) -> str:
+        if num_bytes < 1024:
+            return f"{num_bytes} B"
+        if num_bytes < 1024 * 1024:
+            return f"{num_bytes / 1024:.1f} KB"
+        return f"{num_bytes / (1024 * 1024):.1f} MB"
+
+    def _notepad_list_dir(self) -> Path:
+        return Path(__file__).resolve().parent / "notepad_list"
+
+    def _resolve_saved_path(self, title: str, external_path: str | None = None) -> Path | None:
+        if external_path:
+            path = Path(external_path)
+            return path if path.is_file() else None
+        matches = list(self._notepad_list_dir().rglob(title))
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _stat_from_path_or_fallback(
+        self,
+        path: Path | None,
+        *,
+        content: str = "",
+        updated_at: str | None = None,
+    ) -> tuple[int | None, str | None]:
+        if path is not None and path.is_file():
+            try:
+                st = path.stat()
+                saved_at = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                return int(st.st_size), saved_at
+            except OSError:
+                pass
+        size_bytes = len(content.encode("utf-8")) if content else None
+        saved_at = None
+        if updated_at:
+            saved_at = str(updated_at)[:19].replace("T", " ")
+        return size_bytes, saved_at
+
+    def set_tray_icon(self, tray: QtWidgets.QSystemTrayIcon | None) -> None:
+        self._tray_icon = tray
+
+    def _notify_tray(
+        self,
+        title: str,
+        message: str,
+        *,
+        icon: QtWidgets.QSystemTrayIcon.MessageIcon = QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+        timeout_ms: int = 2500,
+    ) -> None:
+        if self._tray_icon is None:
+            return
+        self._tray_icon.showMessage(title, message, icon, timeout_ms)
+
+    def _report_autosave(
+        self,
+        reason: str,
+        *,
+        ok: bool,
+        filename: str,
+        size_bytes: int | None = None,
+        saved_at: str | None = None,
+        error: str | None = None,
+        notify_tray: bool = False,
+        detail_ui: bool = False,
+    ) -> None:
+        size_text = self._format_file_size(size_bytes) if size_bytes is not None else "-"
+        date_text = saved_at or "-"
+
+        if detail_ui:
+            if ok:
+                msg = f"{reason} 自动保存：{filename} | 大小 {size_text} | {date_text}"
+                timeout = 3500
+            else:
+                err = error or "未知错误"
+                msg = f"{reason} 自动保存失败：{filename} | 大小 {size_text} | {date_text} | {err}"
+                timeout = 5000
+            self.status.showMessage(msg, timeout)
+            self.append_log(msg)
+
+        if notify_tray:
+            if ok:
+                self._notify_tray("L Notepad", f"已自动保存：{filename}（{size_text}）")
+            else:
+                err = error or "未知错误"
+                self._notify_tray(
+                    "L Notepad",
+                    f"自动保存失败：{err}",
+                    icon=QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+                    timeout_ms=5000,
+                )
+
+    def _auto_save_note(
+        self,
+        reason: str,
+        *,
+        notify_tray: bool = False,
+        detail_ui: bool = False,
+    ) -> None:
         if self._ask_ai_mode or not self.state.dirty:
             return
+        if self._current_external_file:
+            self._save_external_file(reason, notify_tray=notify_tray, detail_ui=detail_ui)
+            return
+        if self.state.current_note_id is None:
+            return
         title = self.title_edit.text().strip() or "未命名"
-        content = self._get_content_html()
+        content = self._get_content_text()
         try:
-            if self.state.current_note_id is None:
-                note = self.api.create_note(title=title, content=content)
-            else:
-                note = self.api.update_note(self.state.current_note_id, title=title, content=content)
+            note = self.api.update_note(self.state.current_note_id, title=title, content=content)
         except ApiError as e:
-            self.status.showMessage(f"自动保存失败：{e}", 5000)
-            self.append_log(f"{reason} 自动保存失败：{e}")
+            if detail_ui or notify_tray:
+                self._report_autosave(
+                    reason,
+                    ok=False,
+                    filename=title,
+                    error=str(e),
+                    notify_tray=notify_tray,
+                    detail_ui=detail_ui,
+                )
+            else:
+                self.status.showMessage(f"自动保存失败：{e}", 5000)
+                self.append_log(f"{reason} 自动保存失败：{e}")
             return
 
         self.state.current_note_id = note.id
@@ -611,11 +827,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self._select_note_id(note.id)
         self._update_title()
         self._save_settings()
-        self.status.showMessage(f"{reason} 已自动保存：#{note.id}", 2500)
-        self.append_log(f"{reason} 自动保存日志文件：#{note.id}")
+
+        saved_path = self._resolve_saved_path(note.title)
+        size_bytes, saved_at = self._stat_from_path_or_fallback(
+            saved_path,
+            content=content,
+            updated_at=note.updated_at,
+        )
+        if detail_ui or notify_tray:
+            self._report_autosave(
+                reason,
+                ok=True,
+                filename=note.title,
+                size_bytes=size_bytes,
+                saved_at=saved_at,
+                notify_tray=notify_tray,
+                detail_ui=detail_ui,
+            )
+        else:
+            self.status.showMessage(f"{reason} 已自动保存：#{note.id}", 2500)
+            self.append_log(f"{reason} 自动保存日志文件：#{note.id}")
 
     def _delete_note(self) -> None:
         if self._ask_ai_mode:
+            return
+        if self._current_external_file:
+            file_path = self._current_external_file
+            ret = QtWidgets.QMessageBox.question(self, "移除外部文件", f"从列表移除外部文件？\n{file_path}")
+            if ret != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+            self._external_files = [x for x in self._external_files if x != file_path]
+            self._current_external_file = None
+            self.state.current_note_id = None
+            self.state.dirty = False
+            self._save_external_files_state()
+            self.refresh_notes()
+            self.status.showMessage("已从列表移除，硬盘文件未删除", 2500)
+            self._update_title()
             return
         if self.state.current_note_id is None:
             return
@@ -633,6 +881,135 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_notes()
         self.status.showMessage("已删除", 2500)
         self._update_title()
+
+    def _external_files_state_path(self) -> Path:
+        return Path(__file__).resolve().parent / EXTERNAL_FILES_STATE_NAME
+
+    def _load_external_files_state(self) -> None:
+        state_path = self._external_files_state_path()
+        self._external_files = []
+        self._current_external_file = None
+        if not state_path.exists():
+            return
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        files = data.get("files", []) if isinstance(data, dict) else []
+        current = data.get("current", "") if isinstance(data, dict) else ""
+        if isinstance(files, list):
+            seen: set[str] = set()
+            for item in files:
+                file_path = str(item).strip()
+                if file_path and file_path not in seen:
+                    seen.add(file_path)
+                    self._external_files.append(file_path)
+        current_path = str(current).strip()
+        if current_path in self._external_files:
+            self._current_external_file = current_path
+
+    def _save_external_files_state(self) -> None:
+        data = {
+            "files": self._external_files,
+            "current": self._current_external_file or "",
+        }
+        self._external_files_state_path().write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _open_external_file(self) -> None:
+        if self.state.dirty and not self._confirm_discard():
+            return
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "打开硬盘文件", "")
+        if not file_path:
+            return
+        file_path = str(Path(file_path))
+        if file_path not in self._external_files:
+            self._external_files.insert(0, file_path)
+        self._current_external_file = file_path
+        self.state.current_note_id = None
+        self.state.dirty = False
+        self._save_external_files_state()
+        self.refresh_notes()
+        self._select_external_file(file_path)
+
+    def _set_external_file_editor(self, file_path: str) -> None:
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            self._show_error(f"外部文件不存在：{file_path}")
+            return
+        mode = self._mode_from_filename(path.name)
+        self._ask_ai_mode = False
+        self._current_ai_session_id = None
+        self._current_external_file = str(path)
+        self.state.current_note_id = None
+        if not self.content_edit.load_text_file_cached(path, mode=mode):
+            self._show_error(f"打开外部文件失败：{file_path}")
+            self._current_external_file = None
+            return
+        self.title_edit.blockSignals(True)
+        self.content_edit.blockSignals(True)
+        self.title_edit.setText(path.name)
+        self.title_edit.blockSignals(False)
+        self.content_edit.blockSignals(False)
+        self.ai_tabs.hide()
+        self.content_edit.show()
+        self.ai_answer_edit.hide()
+        self.btn_save.setEnabled(True)
+        self.btn_delete.setEnabled(True)
+        self.btn_favorite.setEnabled(False)
+        self._auto_set_highlight_mode(path.name)
+        self.state.dirty = False
+        self._save_external_files_state()
+        self._update_title()
+
+    def _save_external_file(
+        self,
+        reason: str | None = None,
+        *,
+        notify_tray: bool = False,
+        detail_ui: bool = False,
+    ) -> None:
+        if not self._current_external_file:
+            return
+        path = Path(self._current_external_file)
+        filename = path.name
+        content = self._get_content_text()
+        try:
+            path.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            if reason and (detail_ui or notify_tray):
+                self._report_autosave(
+                    reason,
+                    ok=False,
+                    filename=filename,
+                    error=str(exc),
+                    notify_tray=notify_tray,
+                    detail_ui=detail_ui,
+                )
+            else:
+                self.status.showMessage(f"保存外部文件失败：{exc}", 5000)
+                self.append_log(f"保存外部文件失败：{exc}")
+            return
+        self.state.dirty = False
+        self._save_external_files_state()
+        self._update_title()
+        size_bytes, saved_at = self._stat_from_path_or_fallback(path)
+        if reason and (detail_ui or notify_tray):
+            self._report_autosave(
+                reason,
+                ok=True,
+                filename=filename,
+                size_bytes=size_bytes,
+                saved_at=saved_at,
+                notify_tray=notify_tray,
+                detail_ui=detail_ui,
+            )
+        elif reason:
+            self.status.showMessage(f"{reason} 已保存外部文件", 2500)
+        else:
+            self.status.showMessage("已保存外部文件", 2500)
 
     def _restart_app(self) -> None:
         try:
@@ -721,6 +1098,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"已重命名：#{updated.id}", 2500)
 
     def _set_ai_editor(self, session_id: str | None = None) -> None:
+        assert self.title_edit is not None
+        assert self.btn_ai_ask is not None
+        assert self.btn_save is not None
+        assert self.btn_delete is not None
+        assert self.btn_favorite is not None
+        assert self.btn_new is not None
+        assert self.ai_tabs is not None
         self._ask_ai_mode = True
         self.state.current_note_id = None
         self.state.dirty = False
@@ -730,7 +1114,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.content_edit.hide()
         self.ai_answer_edit.hide()
 
-        session = self._ensure_ai_session(session_id)
+        session = None
+        if session_id and session_id in self._ai_sessions:
+            session = self._ai_sessions[session_id]
+        elif self._current_ai_session_id and self._current_ai_session_id in self._ai_sessions:
+            session = self._ai_sessions[self._current_ai_session_id]
+        elif self.ai_tabs.count() > 0:
+            tab_index = self.ai_tabs.currentIndex()
+            if tab_index < 0:
+                tab_index = 0
+            widget = self.ai_tabs.widget(tab_index)
+            tab_session_id = widget.property("session_id") if widget else None
+            if tab_session_id and tab_session_id in self._ai_sessions:
+                session = self._ai_sessions[tab_session_id]
+        elif self._ai_sessions:
+            session = self._sorted_ai_sessions()[0]
+        if session is None:
+            session = self._new_ai_session(select=True)
         self._current_ai_session_id = session.session_id
 
         # 检查是否已有对应 session 的标签页
@@ -741,25 +1141,37 @@ class MainWindow(QtWidgets.QMainWindow):
                 tab_index = i
                 break
 
-        # 如果没有找到对应标签页，创建一个
-        if tab_index < 0:
-            self._create_ai_tab(session)
-        else:
+        if tab_index >= 0:
             # 切换到已有标签页
             self.ai_tabs.setCurrentIndex(tab_index)
             # 更新标签页内容
             self._update_ai_tab_content(session)
+        else:
+            self.append_log(f"未找到AI标签页，不自动创建: {session.title}")
+            self._update_ai_tab_count()
 
         self.title_edit.blockSignals(True)
         self.title_edit.setText(session.title)
         self.title_edit.blockSignals(False)
 
-        self.btn_ai_ask.setEnabled(not session.in_flight)
-        self.btn_ai_ask.setText("请求中..." if session.in_flight else "问AI")
+        self._update_ai_ask_button_state()
         self.btn_save.setEnabled(False)
         self.btn_delete.setEnabled(False)
         self.btn_favorite.setEnabled(False)
         self.btn_new.setEnabled(True)
+        # 显示 AI 相关的 UI 组件
+        if self.model_combo:
+            self.model_combo.show()
+        if self.btn_refresh_models:
+            self.btn_refresh_models.show()
+        if self.label_input_tokens:
+            self.label_input_tokens.show()
+        if self.label_output_tokens:
+            self.label_output_tokens.show()
+        if self.label_cost:
+            self.label_cost.show()
+        if self.label_price_source:
+            self.label_price_source.show()
         self._update_title()
         self._update_realtime_token_stats()
 
@@ -770,18 +1182,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if content_edit:
             content_edit.blockSignals(True)
-            if session.draft_prompt:
-                content_edit.setPlainText(session.draft_prompt)
-            else:
-                content_edit.setPlainText(
-                    '在这里输入问题，然后点击"问AI"。\n\n'
-                    '支持多会话与上下文记忆。\n'
-                    '模型：千问 / SiliconFlow。\n'
-                )
+            draft = session.draft_prompt
+            if _is_ai_prompt_placeholder_body(draft):
+                draft = ""
+                session.draft_prompt = ""
+            _set_code_editor_document(content_edit, draft)
             content_edit.blockSignals(False)
 
         if answer_edit:
-            answer_edit.setPlainText(self._render_ai_session_text(session))
+            answer_edit.blockSignals(True)
+            _set_code_editor_document(answer_edit, self._render_ai_session_text(session))
+            answer_edit.blockSignals(False)
 
     def _ask_ai(self) -> None:
         if not self._ask_ai_mode or not self._current_ai_session_id:
@@ -816,7 +1227,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 更新标签页的回答显示
         answer_edit = self._get_ai_tab_answer_edit(self._current_ai_session_id)
         if answer_edit:
-            answer_edit.setPlainText(self._render_ai_session_text(session))
+            _set_code_editor_document(answer_edit, self._render_ai_session_text(session))
         self._update_token_labels()
         self.status.showMessage(f"正在请求模型：{model}", 2500)
         self.append_log(f"问AI请求已发送，模型：{model}，会话：{session.title}")
@@ -895,6 +1306,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ai_sessions[self._current_ai_session_id].draft_prompt = content_edit.toPlainText()
         self._ai_input_tokens = self._estimate_tokens(content_edit.toPlainText())
         self._update_token_labels()
+        self._update_ai_ask_button_state()
+
+    def _update_ai_ask_button_state(self) -> None:
+        if self.btn_ai_ask is None:
+            return
+        self.btn_ai_ask.setEnabled(True)
+        self.btn_ai_ask.setText("问AI")
 
     def _current_model_price(self) -> ModelPrice | None:
         model = self.model_combo.currentText().strip()
@@ -1111,13 +1529,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 # 更新回答显示
                 answer_edit = self._get_ai_tab_answer_edit(session_id)
                 if answer_edit:
-                    answer_edit.setPlainText(self._render_ai_session_text(session))
+                    _set_code_editor_document(
+                        answer_edit, self._render_ai_session_text(session)
+                    )
         else:
             session.streaming_text = f"{prefix}:\n{message}"
             if self._current_ai_session_id == session_id:
                 answer_edit = self._get_ai_tab_answer_edit(session_id)
                 if answer_edit:
-                    answer_edit.setPlainText(self._render_ai_session_text(session))
+                    _set_code_editor_document(
+                        answer_edit, self._render_ai_session_text(session)
+                    )
         self._update_token_labels()
         self.status.showMessage(prefix, 3500)
         self.append_log(f"{prefix}（{session.title}）")
@@ -1136,7 +1558,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # 使用标签页的回答编辑器
             answer_edit = self._get_ai_tab_answer_edit(session_id)
             if answer_edit:
-                answer_edit.setPlainText(self._render_ai_session_text(session))
+                _set_code_editor_document(
+                    answer_edit, self._render_ai_session_text(session)
+                )
                 cursor = answer_edit.textCursor()
                 cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
                 answer_edit.setTextCursor(cursor)
@@ -1145,6 +1569,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_editor(self, note: NoteDto | None) -> None:
         self._ask_ai_mode = False
         self._current_ai_session_id = None
+        self._current_external_file = None
         # 切换到普通笔记模式：隐藏 ai_tabs，显示普通编辑器
         self.ai_tabs.hide()
         self.content_edit.show()
@@ -1154,6 +1579,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_save.setEnabled(True)
         self.btn_delete.setEnabled(True)
         self.btn_favorite.setEnabled(True)
+        # 隐藏 AI 相关的 UI 组件
+        if self.model_combo:
+            self.model_combo.hide()
+        if self.btn_refresh_models:
+            self.btn_refresh_models.hide()
+        if self.label_input_tokens:
+            self.label_input_tokens.hide()
+        if self.label_output_tokens:
+            self.label_output_tokens.hide()
+        if self.label_cost:
+            self.label_cost.hide()
+        if self.label_price_source:
+            self.label_price_source.hide()
         self.title_edit.blockSignals(True)
         self.content_edit.blockSignals(True)
         if note is None:
@@ -1162,8 +1600,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.state.current_note_id = None
         else:
             self.title_edit.setText(note.title)
-            self._set_content_html(note.content)
+            note_path = self._note_file_path(note.title)
+            if note_path.is_file() and note_path.suffix.lower() == ".log":
+                mode = self._mode_from_filename(note.title)
+                self.content_edit.load_text_file_cached(note_path, mode=mode)
+            else:
+                self._set_content_text(note.content)
             self.state.current_note_id = note.id
+            # 根据文件扩展名自动切换高亮模式
+            self._auto_set_highlight_mode(note.title)
         self.title_edit.blockSignals(False)
         self.content_edit.blockSignals(False)
         self.state.dirty = False
@@ -1194,11 +1639,24 @@ class MainWindow(QtWidgets.QMainWindow):
         event.ignore()
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
-        if event.type() == QtCore.QEvent.Type.WindowDeactivate:
-            self._auto_save_note("窗口失去焦点")
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            if isinstance(event, QtGui.QWindowStateChangeEvent):
+                old = event.oldState()
+                if not (old & QtCore.Qt.WindowState.WindowMinimized) and (
+                    self.windowState() & QtCore.Qt.WindowState.WindowMinimized
+                ):
+                    self._auto_save_note("窗口最小化", notify_tray=True)
+        elif event.type() == QtCore.QEvent.Type.WindowDeactivate:
+            QtCore.QTimer.singleShot(0, self._auto_save_on_deactivate)
         super().changeEvent(event)
 
+    def _auto_save_on_deactivate(self) -> None:
+        if self.windowState() & QtCore.Qt.WindowState.WindowMinimized:
+            return
+        self._auto_save_note("窗口失去焦点", detail_ui=True)
+
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        # CodeEditorWidget 已代理所有常用方法，直接使用
         text_targets = {
             self.content_edit,
             self.ai_answer_edit,
@@ -1207,6 +1665,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ai_answer_edit.viewport(),
             self.log_view.viewport(),
         }
+        if self.help_view is not None:
+            text_targets.update(
+                {
+                    self.help_view,
+                    self.help_view.viewport(),
+                }
+            )
         if watched in text_targets and event.type() == QtCore.QEvent.Type.Wheel:
             if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
                 delta = event.angleDelta().y()
@@ -1339,14 +1804,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mark_dirty()
 
     def _get_content_html(self) -> str:
+        # CodeEditorWidget 已代理 toHtml 方法
         return self.content_edit.toHtml()
 
+    def _get_content_text(self) -> str:
+        return self.content_edit.toPlainText()
+
     def _set_content_html(self, content: str) -> None:
+        # CodeEditorWidget 已代理 setHtml 和 setPlainText 方法
         if self._looks_like_html(content):
             self.content_edit.setHtml(content)
             self._reload_local_images(self.content_edit)
         else:
             self.content_edit.setPlainText(content)
+
+    def _set_content_text(self, content: str) -> None:
+        self.content_edit.setPlainText(content or "")
 
     @staticmethod
     def _looks_like_html(text: str) -> bool:
@@ -1388,9 +1861,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_text_font_size(self) -> None:
         font = QtGui.QFont("Cascadia Mono", self._text_font_size)
-        for editor in (self.content_edit, self.ai_answer_edit, self.log_view):
-            editor.setFont(font)
-            editor.document().setDefaultFont(font)
+        # CodeEditorWidget 已代理 setFont 和 document 方法
+        editors: list[CodeEditorWidget] = [
+            self.content_edit,
+            self.ai_answer_edit,
+            self.log_view,
+        ]
+        if self.help_view is not None:
+            editors.append(self.help_view)
+        if self.ai_tabs is not None:
+            for i in range(self.ai_tabs.count()):
+                tab = self.ai_tabs.widget(i)
+                if tab is None:
+                    continue
+                for key in ("content_edit", "ai_answer_edit"):
+                    w = tab.property(key)
+                    if isinstance(w, CodeEditorWidget):
+                        editors.append(w)
+        for editor_widget in editors:
+            editor_widget.setFont(font)
+            editor_widget.document().setDefaultFont(font)
 
     def _show_error(self, message: str) -> None:
         QtWidgets.QMessageBox.critical(self, "错误", message)
@@ -1425,7 +1915,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_title(self) -> None:
         suffix = " *" if self.state.dirty else ""
-        cur = f"#{self.state.current_note_id}" if self.state.current_note_id else "新建"
+        if self._current_external_file:
+            cur = f"外部文件: {Path(self._current_external_file).name}"
+        else:
+            cur = f"#{self.state.current_note_id}" if self.state.current_note_id else "新建"
         self.setWindowTitle(f"L Notepad - {cur}{suffix}")
 
     @QtCore.Slot()
@@ -1462,10 +1955,27 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self.append_log("Windows 前台显示逻辑失败")
 
-    @QtCore.Slot(str)
+    def _help_markdown_path(self) -> Path:
+        return Path(__file__).resolve().parent / "help.md"
+
+    def _load_help_page(self) -> None:
+        """从 help.md 加载帮助页（Markdown 预览 + HTML 缓存）。"""
+        if self.help_view is None:
+            return
+        path = self._help_markdown_path()
+        fallback = "# L Notepad\n\n帮助文件未找到，请检查同目录下的 `help.md`。"
+        self.help_view.load_markdown_preview_file(path, fallback=fallback)
+
     def append_log(self, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_view.append(f"[{ts}] {message}")
+        self.log_view.append_text_update_cache(
+            f"[{ts}] {message}\n",
+            LOG_VIEW_CONTENT_CACHE_KEY,
+        )
+        # 滚动到底部
+        scrollbar = self.log_view.verticalScrollBar()
+        if scrollbar:
+            scrollbar.setValue(scrollbar.maximum())
 
     def _sort_notes(self, notes: list[NoteDto]) -> list[NoteDto]:
         fav_rank = {nid: idx for idx, nid in enumerate(self._favorite_order)}
@@ -1526,6 +2036,8 @@ class MainWindow(QtWidgets.QMainWindow):
                             if role in {"user", "assistant"} and content:
                                 parsed_messages.append({"role": role, "content": content})
                     draft_prompt = str(item.get("draft_prompt", ""))
+                    if _is_ai_prompt_placeholder_body(draft_prompt):
+                        draft_prompt = ""
                     self._ai_sessions[sid] = AiSession(
                         session_id=sid,
                         title=title,
@@ -1543,9 +2055,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self._text_font_size = 10
 
     def _restore_ai_tabs(self) -> None:
-        """从保存的会话恢复 AI 标签页"""
-        for sess in self._sorted_ai_sessions():
-            self._create_ai_tab(sess)
+        """从 notepad_list 目录中的问AI文件恢复 AI 标签页"""
+        notepad_list_dir = Path(__file__).resolve().parent / "notepad_list"
+        ask_ai_files = sorted(notepad_list_dir.glob("问AI*.md")) if notepad_list_dir.exists() else []
+        ask_ai_titles = {ask_ai_file.stem for ask_ai_file in ask_ai_files}
+
+        self._ai_sessions = {
+            sid: sess for sid, sess in self._ai_sessions.items()
+            if sess.title in ask_ai_titles
+        }
+        if self._current_ai_session_id not in self._ai_sessions:
+            self._current_ai_session_id = None
+
+        for ask_ai_file in ask_ai_files:
+            title = ask_ai_file.stem
+            existing_session = next(
+                (sess for sess in self._ai_sessions.values() if sess.title == title),
+                None,
+            )
+            if existing_session is None:
+                sid = str(QtCore.QDateTime.currentMSecsSinceEpoch()) + f"_{title}"
+                existing_session = AiSession(session_id=sid, title=title, messages=[])
+                self._ai_sessions[sid] = existing_session
+            if self._current_ai_session_id is None:
+                self._current_ai_session_id = existing_session.session_id
+
+            self._create_ai_tab(existing_session)
+            self._load_ai_session_content(existing_session)
+        
         # 如果有当前会话，切换到对应标签页
         if self._current_ai_session_id:
             for i in range(self.ai_tabs.count()):
@@ -1553,6 +2090,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 if widget and widget.property("session_id") == self._current_ai_session_id:
                     self.ai_tabs.setCurrentIndex(i)
                     break
+        self._update_ai_tab_count()
+    
+    def _load_ai_session_content(self, session: AiSession) -> None:
+        """从 notepad_list 目录加载问AI文件内容到会话"""
+        if not self.ai_tabs:
+            return
+        notepad_list_dir = Path(__file__).resolve().parent / "notepad_list"
+        file_path = notepad_list_dir / f"{session.title}.md"
+        if file_path.exists():
+            try:
+                content = file_path.read_text(encoding="utf-8")
+                # 找到对应的标签页并设置内容
+                for i in range(self.ai_tabs.count()):
+                    widget = self.ai_tabs.widget(i)
+                    if widget and widget.property("session_id") == session.session_id:
+                        content_edit = widget.property("content_edit")
+                        if content_edit:
+                            content_edit.setPlainText(content)
+                        break
+            except Exception as exc:
+                self.append_log(f"加载问AI文件失败 {session.title}: {exc}")
 
     def _save_settings(self) -> None:
         try:
@@ -1588,6 +2146,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._new_ai_session(select=True)
 
     def _new_ai_session(self, select: bool = True) -> AiSession:
+        # 如果会话数量超过10个，删除最旧的会话
+        if len(self._ai_sessions) >= 10:
+            self._remove_oldest_ai_session()
+        
         sid = str(QtCore.QDateTime.currentMSecsSinceEpoch())
         title = f"问AI {len(self._ai_sessions) + 1}"
         sess = AiSession(session_id=sid, title=title, messages=[])
@@ -1598,65 +2160,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self._create_ai_tab(sess)
         self._save_settings()
         return sess
+    
+    def _remove_oldest_ai_session(self) -> None:
+        """删除最旧的AI会话"""
+        if not self._ai_sessions:
+            return
+        # 获取第一个（最旧的）会话ID
+        oldest_sid = next(iter(self._ai_sessions))
+        # 删除对应的标签页
+        for i in range(self.ai_tabs.count()):
+            widget = self.ai_tabs.widget(i)
+            if widget and widget.property("session_id") == oldest_sid:
+                self.ai_tabs.removeTab(i)
+                break
+        # 删除会话
+        del self._ai_sessions[oldest_sid]
 
     def _create_ai_tab(self, session: AiSession) -> None:
-        """为 AI 会话创建一个标签页（从 .ui 模板克隆）"""
-        # 获取模板 widget（第0个标签页）
-        template_widget = self.ai_tabs.widget(0)
-        if template_widget is None:
-            # 回退：如果模板不存在，动态创建
-            tab_widget = QtWidgets.QWidget()
-            tab_layout = QtWidgets.QVBoxLayout(tab_widget)
-            tab_layout.setSpacing(10)
-            tab_layout.setContentsMargins(10, 10, 10, 10)
-            content_edit = QtWidgets.QTextEdit()
-            content_edit.setObjectName("CodeEditor")
-            content_edit.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
-            content_edit.setPlaceholderText('在这里输入问题，然后点击"问AI"。\n\n支持多会话与上下文记忆。\n模型：千问 / SiliconFlow。')
-            ai_answer_edit = QtWidgets.QTextEdit()
-            ai_answer_edit.setObjectName("AiAnswerViewer")
+        """为 AI 会话创建一个标签页（从 .ui 模板克隆为 CodeEditorWidget）"""
+        tab_widget = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab_widget)
+        tab_layout.setSpacing(10)
+        tab_layout.setContentsMargins(10, 10, 10, 10)
+
+        template_content = getattr(self, "_ai_template_content_edit", None)
+        template_answer = getattr(self, "_ai_template_answer_edit", None)
+
+        content_edit = create_code_editor_widget(tab_widget, "CodeEditor", template_content)
+        if template_content is None:
+            content_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+            content_edit.setPlaceholderText(_AI_PROMPT_PLACEHOLDER)
+
+        ai_answer_edit = create_code_editor_widget(tab_widget, "AiAnswerViewer", template_answer)
+        if template_answer is None:
             ai_answer_edit.setReadOnly(True)
-            ai_answer_edit.setPlaceholderText("AI 回答会显示在这里（支持多会话上下文）")
-            tab_layout.addWidget(content_edit, 1)
-            tab_layout.addWidget(ai_answer_edit, 2)
-        else:
-            # 克隆模板
-            tab_widget = QtWidgets.QWidget()
-            tab_layout = QtWidgets.QVBoxLayout(tab_widget)
-            tab_layout.setSpacing(10)
-            tab_layout.setContentsMargins(10, 10, 10, 10)
+            ai_answer_edit.setPlaceholderText(_AI_ANSWER_PLACEHOLDER)
 
-            # 克隆输入框
-            template_content = template_widget.findChild(QtWidgets.QTextEdit, "ai_tab_content_edit_template")
-            content_edit = QtWidgets.QTextEdit()
-            content_edit.setObjectName("CodeEditor")
-            content_edit.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
-            if template_content:
-                content_edit.setPlaceholderText(template_content.placeholderText())
-            else:
-                content_edit.setPlaceholderText('在这里输入问题，然后点击"问AI"。\n\n支持多会话与上下文记忆。\n模型：千问 / SiliconFlow。')
+        tab_layout.addWidget(content_edit, 1)
+        tab_layout.addWidget(ai_answer_edit, 2)
 
-            # 克隆回答框
-            template_answer = template_widget.findChild(QtWidgets.QTextEdit, "ai_tab_answer_edit_template")
-            ai_answer_edit = QtWidgets.QTextEdit()
-            ai_answer_edit.setObjectName("AiAnswerViewer")
-            ai_answer_edit.setReadOnly(True)
-            if template_answer:
-                ai_answer_edit.setPlaceholderText(template_answer.placeholderText())
-            else:
-                ai_answer_edit.setPlaceholderText("AI 回答会显示在这里（支持多会话上下文）")
+        font = QtGui.QFont("Cascadia Mono", self._text_font_size)
+        for editor_widget in (content_edit, ai_answer_edit):
+            editor_widget.setFont(font)
+            editor_widget.document().setDefaultFont(font)
 
-            # 添加到布局（比例 1:2）
-            tab_layout.addWidget(content_edit, 1)
-            tab_layout.addWidget(ai_answer_edit, 2)
-
-        # 存储 session_id 到 widget
         tab_widget.setProperty("session_id", session.session_id)
         tab_widget.setProperty("content_edit", content_edit)
         tab_widget.setProperty("ai_answer_edit", ai_answer_edit)
 
-        # 连接文本变化信号
-        content_edit.textChanged.connect(lambda: self._on_ai_tab_text_changed(session.session_id))
+        content_edit.editor().textChanged.connect(
+            lambda: self._on_ai_tab_text_changed(session.session_id)
+        )
 
         # 添加到标签页
         index = self.ai_tabs.addTab(tab_widget, session.title)
@@ -1664,6 +2218,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 为新标签设置关闭按钮
         self._setup_ai_tab_close_button(index)
+        self._update_ai_tab_count()
+        self._update_ai_tab_content(session)
+
+    def _update_ai_tab_count(self) -> None:
+        count = self.ai_tabs.count() if self.ai_tabs else 0
+        self.tab_count.setText(f"Tab: {count}")
+        self.append_log(f"AI标签页数量: {count}")
 
     def _setup_ai_tab_close_button(self, index: int) -> None:
         """为指定索引的AI标签页设置关闭按钮"""
@@ -1693,7 +2254,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self.ai_tabs.currentWidget()
 
-    def _get_ai_tab_content_edit(self, session_id: str | None = None) -> QtWidgets.QTextEdit | None:
+    def _get_ai_tab_content_edit(self, session_id: str | None = None) -> CodeEditorWidget | None:
         """获取指定会话的内容编辑器，如果不指定则获取当前标签页的"""
         if session_id is None:
             widget = self._get_current_ai_tab_widget()
@@ -1707,7 +2268,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return widget.property("content_edit")
         return None
 
-    def _get_ai_tab_answer_edit(self, session_id: str | None = None) -> QtWidgets.QTextEdit | None:
+    def _get_ai_tab_answer_edit(self, session_id: str | None = None) -> CodeEditorWidget | None:
         """获取指定会话的回答编辑器，如果不指定则获取当前标签页的"""
         if session_id is None:
             widget = self._get_current_ai_tab_widget()
@@ -1738,6 +2299,7 @@ class MainWindow(QtWidgets.QMainWindow):
             del self._ai_sessions[session_id]
         self.ai_tabs.removeTab(index)
         widget.deleteLater()
+        self._update_ai_tab_count()
         # 如果所有标签都关闭了，退出 AI 模式
         if self.ai_tabs.count() == 0:
             self._ask_ai_mode = False
@@ -1847,12 +2409,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.title_edit.blockSignals(False)
             # 更新 token 统计
             self._update_realtime_token_stats()
+            self._update_ai_ask_button_state()
         self._save_settings()
 
     def _render_ai_session_text(self, session: AiSession) -> str:
         chunks: list[str] = []
         if not session.messages and not session.streaming_text:
-            return "AI 回答会显示在这里（支持多会话上下文）"
+            return ""
         for msg in session.messages:
             role = "你" if msg.get("role") == "user" else "AI"
             chunks.append(f"{role}:\n{msg.get('content', '')}\n")

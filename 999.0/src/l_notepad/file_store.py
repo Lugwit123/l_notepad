@@ -9,6 +9,16 @@ from typing import Iterable
 
 
 @dataclass(frozen=True)
+class FileNoteMeta:
+    """List view metadata without reading full file content."""
+
+    path: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class FileNote:
     path: str  # posix-like relative path under notepad_list
     title: str  # file name
@@ -47,6 +57,7 @@ def _iso_from_ts(ts: float) -> str:
 def sanitize_title_to_filename(title: str) -> str:
     """
     Windows-safe filename. Keep Chinese and most Unicode; remove control chars; replace reserved characters.
+    Automatically adds .md extension if not present.
     """
     v = (title or "").strip()
     if not v:
@@ -54,7 +65,11 @@ def sanitize_title_to_filename(title: str) -> str:
     v = _CONTROL_CHARS.sub("", v)
     v = _INVALID_FILENAME_CHARS.sub("_", v)
     v = v.strip(" .")
-    return v or "未命名"
+    v = v or "未命名"
+    # 自动添加 .md 后缀（如果没有后缀）
+    if not v.lower().endswith(('.md', '.mdc', '.txt', '.py', '.json', '.log')):
+        v += ".md"
+    return v
 
 
 def normalize_rel_posix_path(rel_path: str) -> str:
@@ -88,6 +103,28 @@ def iter_note_files(root_dir: Path) -> Iterable[Path]:
     if not root_dir.exists():
         return []
     return (p for p in root_dir.rglob("*") if p.is_file())
+
+
+def list_notes_meta(root_dir: Path, limit: int = 500) -> list[FileNoteMeta]:
+    ensure_root(root_dir)
+    files = list(iter_note_files(root_dir))
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    out: list[FileNoteMeta] = []
+    for p in files[: max(1, limit)]:
+        try:
+            rel = p.relative_to(root_dir).as_posix()
+        except Exception:
+            continue
+        st = p.stat()
+        out.append(
+            FileNoteMeta(
+                path=rel,
+                title=p.name,
+                created_at=_iso_from_ts(st.st_ctime),
+                updated_at=_iso_from_ts(st.st_mtime),
+            )
+        )
+    return out
 
 
 def list_notes(root_dir: Path, limit: int = 500) -> list[FileNote]:
@@ -151,6 +188,13 @@ def _unique_path(root_dir: Path, target: Path) -> Path:
         if not cand.exists():
             return cand
     raise RuntimeError("cannot find unique filename")
+
+
+def _ensure_extension(filename: str, ext: str = ".md") -> str:
+    """确保文件名有指定扩展名。"""
+    if not filename.lower().endswith(('.md', '.mdc', '.txt', '.py', '.json', '.log')):
+        return filename + ext
+    return filename
 
 
 def create_note(root_dir: Path, title: str, content: str, category_dir: str = "") -> FileNote:

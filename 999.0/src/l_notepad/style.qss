@@ -33,11 +33,14 @@ QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
   background: rgba(21, 30, 48, 0.98);
 }
 
-QLineEdit::placeholder, QTextEdit::placeholder {
+QLineEdit::placeholder, QTextEdit::placeholder, QPlainTextEdit::placeholder {
   color: rgba(233,238,245,0.42);
 }
 
-QTextEdit#CodeEditor, LineNumberTextEdit#CodeEditor, QTextEdit#LogViewer, QTextEdit#AiAnswerViewer {
+QTextEdit#CodeEditor, QPlainTextEdit#CodeEditor, LineNumberTextEdit#CodeEditor,
+QTextEdit#LogViewer, QPlainTextEdit#LogViewer, LineNumberTextEdit#LogViewer,
+QTextEdit#HelpViewer, QPlainTextEdit#HelpViewer, LineNumberTextEdit#HelpViewer,
+QTextEdit#AiAnswerViewer, QPlainTextEdit#AiAnswerViewer, LineNumberTextEdit#AiAnswerViewer {
   background: #080D14;
   color: #D6DEEB;
   border: 1px solid rgba(137, 221, 255, 0.13);
@@ -142,7 +145,7 @@ QTabBar::tab {
   background: rgba(255,255,255,0.055);
   border: 1px solid rgba(255,255,255,0.09);
   border-radius: 10px;
-  padding: 8px 20px;
+  padding: 4px 8px;
   margin-right: 6px;
   margin-bottom: 8px;
 }
@@ -176,7 +179,7 @@ QTabBar QPushButton {
   border: none;
   font-weight: bold;
   font-size: 14px;
-  padding: 0px;
+  padding: 1px;
   margin: 0px 4px 0px 0px;
   min-width: 14px;
   max-width: 14px;

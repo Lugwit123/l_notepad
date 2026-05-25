@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -281,12 +282,20 @@ class _IndexedNote:
     dto: NoteDto
 
 
+def _stable_note_id(rel_path: str) -> int:
+    """Stable int id from relative path (survives mtime sort changes)."""
+    raw = zlib.crc32(rel_path.encode("utf-8")) & 0x7FFFFFFF
+    return raw if raw != 0 else 1
+
+
 class LocalNotepadApi:
     """Provide the same interface as NotepadApi, backed by local files."""
 
     def __init__(self, root_dir: Path | None = None) -> None:
         self.root_dir = root_dir or file_store.default_root_dir()
         file_store.ensure_root(self.root_dir)
+        self._index: list[_IndexedNote] | None = None
+        self._by_id: dict[int, _IndexedNote] | None = None
 
     def list_notes(self) -> list[NoteDto]:
         return [x.dto for x in self._indexed_notes()]
@@ -295,14 +304,20 @@ class LocalNotepadApi:
         indexed = self._find_by_id(note_id)
         if indexed is None:
             raise ApiError(f"note not found: {note_id}")
-        return indexed.dto
+        note = file_store.get_note(self.root_dir, indexed.rel_path)
+        if note is None:
+            self._invalidate_index()
+            raise ApiError(f"note not found: {note_id}")
+        return self._to_dto(indexed.note_id, note)
 
     def create_note(self, title: str, content: str) -> NoteDto:
         try:
             created = file_store.create_note(self.root_dir, title=title, content=content)
         except Exception as exc:
             raise ApiError(f"create note failed: {exc}") from exc
-        return self._to_dto(self._next_id(), created)
+        self._invalidate_index()
+        note_id = _stable_note_id(created.path)
+        return self._to_dto(note_id, created)
 
     def update_note(self, note_id: int, title: str, content: str) -> NoteDto:
         indexed = self._find_by_id(note_id)
@@ -319,7 +334,9 @@ class LocalNotepadApi:
             raise ApiError(f"update note failed: {exc}") from exc
         if updated is None:
             raise ApiError(f"note not found: {note_id}")
-        return self._to_dto(note_id, updated)
+        self._invalidate_index()
+        new_id = _stable_note_id(updated.path)
+        return self._to_dto(new_id, updated)
 
     def delete_note(self, note_id: int) -> None:
         indexed = self._find_by_id(note_id)
@@ -331,25 +348,46 @@ class LocalNotepadApi:
             raise ApiError(f"delete note failed: {exc}") from exc
         if not ok:
             raise ApiError(f"note not found: {note_id}")
+        self._invalidate_index()
 
-    def _next_id(self) -> int:
-        notes = self._indexed_notes()
-        if not notes:
-            return 1
-        return max(x.note_id for x in notes) + 1
+    def _invalidate_index(self) -> None:
+        self._index = None
+        self._by_id = None
 
     def _find_by_id(self, note_id: int) -> _IndexedNote | None:
-        for item in self._indexed_notes():
-            if item.note_id == int(note_id):
-                return item
-        return None
+        self._ensure_index()
+        assert self._by_id is not None
+        return self._by_id.get(int(note_id))
+
+    def _ensure_index(self) -> None:
+        if self._index is not None and self._by_id is not None:
+            return
+        metas = file_store.list_notes_meta(self.root_dir, limit=10_000)
+        index: list[_IndexedNote] = []
+        by_id: dict[int, _IndexedNote] = {}
+        for meta in metas:
+            note_id = _stable_note_id(meta.path)
+            dto = self._meta_to_dto(note_id, meta)
+            item = _IndexedNote(note_id=note_id, rel_path=meta.path, dto=dto)
+            index.append(item)
+            by_id[note_id] = item
+        self._index = index
+        self._by_id = by_id
 
     def _indexed_notes(self) -> list[_IndexedNote]:
-        notes = file_store.list_notes(self.root_dir, limit=10_000)
-        out: list[_IndexedNote] = []
-        for idx, n in enumerate(notes, start=1):
-            out.append(_IndexedNote(note_id=idx, rel_path=n.path, dto=self._to_dto(idx, n)))
-        return out
+        self._ensure_index()
+        assert self._index is not None
+        return self._index
+
+    @staticmethod
+    def _meta_to_dto(note_id: int, meta: file_store.FileNoteMeta) -> NoteDto:
+        return NoteDto(
+            id=int(note_id),
+            title=meta.title,
+            content="",
+            created_at=meta.created_at,
+            updated_at=meta.updated_at,
+        )
 
     @staticmethod
     def _to_dto(note_id: int, note: file_store.FileNote) -> NoteDto:
@@ -401,6 +439,7 @@ def main() -> int:
         hotkey_interval_callback=_update_hotkey_interval,
     )
     tray = _setup_tray_icon(app, win, app.windowIcon())
+    win.set_tray_icon(tray)
 
     def _append_log(message: str) -> None:
         QtCore.QMetaObject.invokeMethod(
