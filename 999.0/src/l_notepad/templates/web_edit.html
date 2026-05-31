@@ -1373,6 +1373,14 @@
         window.addEventListener("resize", resizeEditorShell);
         // 首次渲染后字体加载可能改变布局，再算一次
         requestAnimationFrame(resizeEditorShell);
+
+        // 切换笔记时如果命中浏览器 bfcache，页面脚本可能不会重新执行，
+        // 这会导致右侧编辑区停留在上一条笔记的状态。强制刷新当前页即可。
+        window.addEventListener("pageshow", function (e) {
+          if (e.persisted) {
+            window.location.reload();
+          }
+        });
       })();
     </script>
   </body>

@@ -8,7 +8,9 @@ import json
 import os
 import re
 import ctypes
+import logging
 import threading
+import traceback
 import urllib.error
 import urllib.request
 import uuid
@@ -18,6 +20,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtUiTools, QtWidgets
+try:
+    import shiboken6
+except Exception:  # pragma: no cover - shiboken6 随 PySide6 提供，兜底避免导入异常
+    shiboken6 = None
 
 from .api_client import ApiError, NotepadApi, NoteDto
 
@@ -68,6 +74,13 @@ ASK_AI_SESSION_PREFIX = "__ask_ai_session__:"
 EXTERNAL_FILE_PREFIX = "__external_file__:"
 EXTERNAL_FILES_STATE_NAME = "external_files.json"
 LOG_VIEW_CONTENT_CACHE_KEY = "__l_notepad_log_view__"
+LOG_LEVEL = logging.INFO
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logging.getLogger().setLevel(LOG_LEVEL)
+logger = logging.getLogger(__name__)
 _SILICONFLOW_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -259,6 +272,10 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._in_selection_changed = False
         self._initializing = True
         self._tray_icon: QtWidgets.QSystemTrayIcon | None = None
+        self._log_level = "INFO"
+        self._settings.setValue("log/level", self._log_level)
+        self._previous_excepthook = sys.excepthook
+        sys.excepthook = self._log_unhandled_exception
         self._ai_bridge = AiBridge()
         self._ai_bridge.chunk.connect(self._on_ai_chunk)
         self._ai_bridge.finished.connect(self._on_ai_finished)
@@ -412,6 +429,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         # 设置关闭按钮图标（X符号）
         self._setup_ai_tab_close_buttons()
 
+        self._tab_main_widget = self.findChild(QtWidgets.QWidget, "tab_main")
         self._tab_log_widget = self.findChild(QtWidgets.QWidget, "tab_log")
         if self.tabs is not None:
             self.tabs.currentChanged.connect(self._on_main_tab_changed)
@@ -647,16 +665,25 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self.notes_list.addItem(item)
         self.notes_list.blockSignals(False)
 
+        def _select_row_and_refresh(row: int) -> None:
+            self.notes_list.setCurrentRow(row)
+            if not self._initializing:
+                self._on_selection_changed_inner()
+
         # AI 会话不再在列表中显示，只选择问AI按钮（第0行）或笔记
         if self._ask_ai_mode:
-            self.notes_list.setCurrentRow(0)  # 选择问AI按钮
+            _select_row_and_refresh(0)  # 选择问AI按钮
             self._set_ai_editor(self._current_ai_session_id)
         elif current_id is not None:
-            self._select_note_id(current_id)
+            selected = self._select_note_id(current_id)
+            if not selected:
+                self.append_log(f"刷新列表后未找到当前笔记: #{current_id}")
         elif self._current_external_file:
-            self._select_external_file(self._current_external_file)
+            selected = self._select_external_file(self._current_external_file)
+            if not selected:
+                self.append_log(f"刷新列表后未找到外部文件: {self._current_external_file}")
         elif self.notes_list.count() > 1:
-            self.notes_list.setCurrentRow(1)  # 跳过问AI按钮，选择第一个笔记
+            _select_row_and_refresh(1)  # 跳过问AI按钮，选择第一个笔记
         else:
             self._set_editor(None)
         current_item = self.notes_list.currentItem() if self.notes_list else None
@@ -668,7 +695,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         # lightweight local filter; refresh keeps the list consistent
         self.refresh_notes()
 
-    def _select_note_id(self, note_id: int) -> None:
+    def _select_note_id(self, note_id: int) -> bool:
         for i in range(self.notes_list.count()):
             item = self.notes_list.item(i)
             item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -680,15 +707,17 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 continue
             if int(item_id) == int(note_id):
                 self.notes_list.setCurrentRow(i)
-                return
+                return True
+        return False
 
-    def _select_external_file(self, file_path: str) -> None:
+    def _select_external_file(self, file_path: str) -> bool:
         target = f"{EXTERNAL_FILE_PREFIX}{file_path}"
         for i in range(self.notes_list.count()):
             item = self.notes_list.item(i)
             if item.data(QtCore.Qt.ItemDataRole.UserRole) == target:
                 self.notes_list.setCurrentRow(i)
-                return
+                return True
+        return False
 
     def _select_ai_session_id(self, session_id: str) -> None:
         target = f"{ASK_AI_SESSION_PREFIX}{session_id}"
@@ -704,30 +733,38 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._in_selection_changed = True
         try:
             self._on_selection_changed_inner()
+        except Exception:
+            self._append_exception_log("选择切换异常")
+            raise
         finally:
             self._in_selection_changed = False
 
     def _on_selection_changed_inner(self) -> None:
         items = self.notes_list.selectedItems()
         item_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole) if items else None
+        self.append_debug_log(f"选择切换: item_id={item_id!r}, selected={len(items)}")
         if item_id == ASK_AI_ITEM_ID:
             if not self._initializing and self.state.current_note_id is not None:
                 self._auto_save_note("切换到问AI前", detail_ui=True)
+            self.append_debug_log("切换到 AI 模式")
             self._set_ai_editor(self._current_ai_session_id)
             # AI 会话不再在列表中显示，不需要选择
             return
         # AI 会话不再在列表中，不再处理 ASK_AI_SESSION_PREFIX
 
         if self.state.dirty:
+            self.append_debug_log("切换到普通笔记/外部文件前触发自动保存")
             self._auto_save_note("切换日志前", detail_ui=True)
 
         if not items:
+            self.append_log("未选中任何条目，切换到空编辑器")
             self._set_editor(None)
             return
 
         self._ask_ai_mode = False
         item_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole)
         if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
+            self.append_log(f"切换到外部文件: {item_id[len(EXTERNAL_FILE_PREFIX):]}")
             self._set_external_file_editor(item_id[len(EXTERNAL_FILE_PREFIX):])
             return
         note_id = int(item_id)
@@ -736,6 +773,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         except ApiError as e:
             self._show_error(str(e))
             return
+        self.append_log(f"切换到普通笔记: #{note.id} {note.title}")
         self._set_editor(note)
         self._last_open_note_id = note.id
         self._save_settings()
@@ -1021,6 +1059,102 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.refresh_notes()
         self._select_external_file(file_path)
 
+    def _qt_is_valid(self, widget) -> bool:
+        """检查 PySide 包装对象背后的 C++ 对象是否仍然有效。"""
+        if widget is None:
+            return False
+        if shiboken6 is None:
+            return True
+        try:
+            return bool(shiboken6.isValid(widget))
+        except Exception:
+            return False
+
+    def _refresh_core_widget_refs(self) -> None:
+        """重新获取可能被 Qt 删除/替换过的核心控件引用。"""
+        if not self._qt_is_valid(getattr(self, "tabs", None)):
+            self.tabs = self.findChild(QtWidgets.QTabWidget, "tabs")
+        if not self._qt_is_valid(getattr(self, "ai_tabs", None)):
+            self.ai_tabs = self.findChild(QtWidgets.QTabWidget, "ai_tabs")
+            self.append_log(f"重新获取 ai_tabs 引用: valid={self._qt_is_valid(self.ai_tabs)}")
+        if not self._qt_is_valid(getattr(self, "content_edit", None)):
+            widget = self.findChild(CodeEditorWidget, "CodeEditor")
+            if widget is not None:
+                self.content_edit = widget
+                self.append_log("重新获取 content_edit 引用")
+        if not self._qt_is_valid(getattr(self, "ai_answer_edit", None)):
+            widget = self.findChild(CodeEditorWidget, "AiAnswerViewer")
+            if widget is not None:
+                self.ai_answer_edit = widget
+                self.append_log("重新获取 ai_answer_edit 引用")
+
+    def _ensure_main_tab_active(self, reason: str) -> None:
+        """切换左侧笔记/AI 时确保主界面页是当前页，否则右侧父级不可见。"""
+        self._refresh_core_widget_refs()
+        if not self._qt_is_valid(getattr(self, "tabs", None)) or not self._qt_is_valid(getattr(self, "_tab_main_widget", None)):
+            return
+        main_index = self.tabs.indexOf(self._tab_main_widget)
+        if main_index < 0:
+            return
+        if self.tabs.currentIndex() != main_index:
+            self.tabs.setCurrentIndex(main_index)
+            self.append_log(f"已切回主界面页: reason={reason}, index={main_index}")
+
+    def _set_right_panel_mode(self, mode: str) -> None:
+        """统一切换右侧主编辑区域，避免 AI/普通笔记/外部文件状态残留。"""
+        self._refresh_core_widget_refs()
+        self._ensure_main_tab_active(f"right_panel:{mode}")
+        is_ai = mode == "ai"
+        is_editor = mode in {"note", "external", "empty"}
+        ai_tabs_valid = self._qt_is_valid(getattr(self, "ai_tabs", None))
+        content_valid = self._qt_is_valid(getattr(self, "content_edit", None))
+        answer_valid = self._qt_is_valid(getattr(self, "ai_answer_edit", None))
+        if ai_tabs_valid:
+            self.ai_tabs.setVisible(is_ai)
+        elif is_ai:
+            self.append_log("警告: ai_tabs 已失效，无法显示 AI 面板")
+        if content_valid:
+            self.content_edit.setVisible(is_editor)
+        else:
+            self.append_log("警告: content_edit 已失效，无法显示普通笔记面板")
+        if answer_valid:
+            self.ai_answer_edit.hide()
+        if is_ai and ai_tabs_valid:
+            self.ai_tabs.raise_()
+        elif is_editor and content_valid:
+            self.content_edit.raise_()
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        parent = self.content_edit.parentWidget() if content_valid else None
+        self.append_log(
+            "右侧面板切换: "
+            f"mode={mode}, current_tab={self.tabs.currentIndex() if self._qt_is_valid(getattr(self, 'tabs', None)) else -1}, "
+            f"ai_tabs_valid={ai_tabs_valid}, "
+            f"ai_tabs={self.ai_tabs.isVisible() if ai_tabs_valid else None}, "
+            f"content_valid={content_valid}, "
+            f"content_edit={self.content_edit.isVisible() if content_valid else None}, "
+            f"content_hidden={self.content_edit.isHidden() if content_valid else None}, "
+            f"content_parent_visible={parent.isVisible() if parent else None}, "
+            f"content_size={self.content_edit.size().width()}x{self.content_edit.size().height() if content_valid else -1}, "
+            f"ai_answer_edit={self.ai_answer_edit.isVisible() if answer_valid else None}, "
+            f"ai_tabs_count={self.ai_tabs.count() if ai_tabs_valid else None}"
+        )
+
+    def _set_ai_controls_visible(self, visible: bool) -> None:
+        """统一切换 AI 顶部/状态栏相关控件可见性。"""
+        for widget in (
+            self.provider_combo,
+            self.label_model,
+            self.model_combo,
+            self.btn_refresh_models,
+            self.label_input_tokens,
+            self.label_output_tokens,
+            self.label_cost,
+            self.label_price_source,
+        ):
+            if widget:
+                widget.setVisible(visible)
+        self.append_log(f"AI 控件可见性: {visible}")
+
     def _set_external_file_editor(self, file_path: str) -> None:
         path = Path(file_path)
         if not path.exists() or not path.is_file():
@@ -1040,9 +1174,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.title_edit.setText(path.name)
         self.title_edit.blockSignals(False)
         self.content_edit.blockSignals(False)
-        self.ai_tabs.hide()
-        self.content_edit.show()
-        self.ai_answer_edit.hide()
+        self._set_right_panel_mode("external")
+        self._set_ai_controls_visible(False)
+        self.btn_ai_ask.setEnabled(False)
         self.btn_save.setEnabled(True)
         self.btn_delete.setEnabled(True)
         self.btn_favorite.setEnabled(False)
@@ -1114,21 +1248,32 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._show_error(f"重启失败: {exc}")
 
     def _toggle_favorite_current(self) -> None:
+        self.append_log(
+            f"点击置顶/收藏: ask_ai_mode={self._ask_ai_mode}, current_note_id={self.state.current_note_id}, "
+            f"current_external={self._current_external_file!r}"
+        )
         if self._ask_ai_mode:
+            self.append_log("当前处于 AI 模式，忽略置顶/收藏切换")
             return
         if self.state.current_note_id is None:
+            self.append_log("当前没有可置顶的笔记，忽略")
             return
         note_id = int(self.state.current_note_id)
+        before = list(self._favorite_order)
         if note_id in self._favorite_order:
             self._favorite_order = [x for x in self._favorite_order if x != note_id]
             self.status.showMessage("已取消置顶/收藏", 2000)
+            action = "取消"
         else:
             self._favorite_order.insert(0, note_id)
             self.status.showMessage("已置顶/收藏", 2000)
+            action = "置顶"
+        self.append_log(f"置顶/收藏操作: note_id={note_id}, action={action}, before={before}, after={self._favorite_order}")
         self._save_settings()
         self.refresh_notes()
         self._select_note_id(note_id)
         self._update_favorite_button_label()
+        self.append_log(f"置顶/收藏完成: button_text={self.btn_favorite.text()!r}")
 
     def _on_notes_rows_moved(self, *_args) -> None:
         first = self.notes_list.item(0) if self.notes_list.count() else None
@@ -1197,28 +1342,46 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.state.dirty = False
 
         # 切换到 AI 模式：显示 ai_tabs，隐藏普通编辑器
-        self.ai_tabs.show()
-        self.content_edit.hide()
-        self.ai_answer_edit.hide()
+        self.append_log(f"进入 AI 模式，session_id={session_id!r}")
+        self._set_right_panel_mode("ai")
+        # 先确保至少有一个可见 AI 标签页，避免右侧布局没有任何内容变化
+        if self.ai_tabs.count() == 0:
+            self.append_log("AI 标签页当前为空，立即创建默认会话页")
+            session = self._new_ai_session(select=True)
+            self._current_ai_session_id = session.session_id
+            self.append_log(f"默认会话页已创建: {session.session_id} / {session.title}")
 
         session = None
         if session_id and session_id in self._ai_sessions:
             session = self._ai_sessions[session_id]
+            self.append_log(f"使用传入的 AI 会话: {session.session_id}")
         elif self._current_ai_session_id and self._current_ai_session_id in self._ai_sessions:
             session = self._ai_sessions[self._current_ai_session_id]
+            self.append_log(f"使用当前 AI 会话: {session.session_id}")
         elif self.ai_tabs.count() > 0:
             tab_index = self.ai_tabs.currentIndex()
             if tab_index < 0:
                 tab_index = 0
             widget = self.ai_tabs.widget(tab_index)
             tab_session_id = widget.property("session_id") if widget else None
+            self.append_log(f"尝试从当前 AI 标签页获取会话: index={tab_index}, session_id={tab_session_id!r}")
             if tab_session_id and tab_session_id in self._ai_sessions:
                 session = self._ai_sessions[tab_session_id]
         elif self._ai_sessions:
             session = self._sorted_ai_sessions()[0]
+            self.append_log(f"从已有 AI 会话中选取: {session.session_id}")
         if session is None:
+            self.append_log(f"未找到可复用 AI 会话，准备创建新会话；当前 sessions={len(self._ai_sessions)}, tabs={self.ai_tabs.count()}")
             session = self._new_ai_session(select=True)
+            self.append_log(f"新建 AI 会话完成: {session.session_id} / {session.title}, tabs={self.ai_tabs.count()}")
         self._current_ai_session_id = session.session_id
+        self.append_log(f"AI 当前会话: {session.session_id} / {session.title}")
+        self.append_log(f"AI 标签页数量: {self.ai_tabs.count()}")
+        self.append_log(f"AI tabs visible after select: {self.ai_tabs.isVisible()}")
+        self.append_log(f"当前 AI 标签页索引: {self.ai_tabs.currentIndex()}")
+        if self.ai_tabs.count() == 0:
+            self.append_log("警告: AI 标签页数量为 0，尝试强制创建一个标签页")
+            self._create_ai_tab(session)
 
         # 检查是否已有对应 session 的标签页
         tab_index = -1
@@ -1230,6 +1393,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
         if tab_index >= 0:
             # 切换到已有标签页
+            self.append_log(f"定位到 AI 标签页索引: {tab_index}")
             self.ai_tabs.setCurrentIndex(tab_index)
             # 更新标签页内容
             self._update_ai_tab_content(session)
@@ -1246,25 +1410,10 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.btn_delete.setEnabled(False)
         self.btn_favorite.setEnabled(False)
         self.btn_new.setEnabled(True)
-        # 显示 AI 相关的 UI 组件
-        if self.provider_combo:
-            self.provider_combo.show()
-        if self.label_model:
-            self.label_model.show()
-        if self.model_combo:
-            self.model_combo.show()
-        if self.btn_refresh_models:
-            self.btn_refresh_models.show()
-        if self.label_input_tokens:
-            self.label_input_tokens.show()
-        if self.label_output_tokens:
-            self.label_output_tokens.show()
-        if self.label_cost:
-            self.label_cost.show()
-        if self.label_price_source:
-            self.label_price_source.show()
+        self._set_ai_controls_visible(True)
         self._update_title()
         self._update_realtime_token_stats()
+        self.append_log("AI 模式切换完成")
 
     def _update_ai_tab_content(self, session: AiSession) -> None:
         """更新指定会话的标签页内容"""
@@ -1687,54 +1836,75 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._ask_ai_mode = False
         self._current_ai_session_id = None
         self._current_external_file = None
-        # 切换到普通笔记模式：隐藏 ai_tabs，显示普通编辑器
-        self.ai_tabs.hide()
-        self.content_edit.show()
-        self.ai_answer_edit.hide()
+        self._set_right_panel_mode("empty" if note is None else "note")
         self.ai_answer_edit.clear()
         self.btn_ai_ask.setEnabled(False)
         self.btn_save.setEnabled(True)
         self.btn_delete.setEnabled(True)
         self.btn_favorite.setEnabled(True)
-        # 隐藏 AI 相关的 UI 组件
-        if self.provider_combo:
-            self.provider_combo.hide()
-        if self.label_model:
-            self.label_model.hide()
-        if self.model_combo:
-            self.model_combo.hide()
-        if self.btn_refresh_models:
-            self.btn_refresh_models.hide()
-        if self.label_input_tokens:
-            self.label_input_tokens.hide()
-        if self.label_output_tokens:
-            self.label_output_tokens.hide()
-        if self.label_cost:
-            self.label_cost.hide()
-        if self.label_price_source:
-            self.label_price_source.hide()
+        self._set_ai_controls_visible(False)
         self.title_edit.blockSignals(True)
         self.content_edit.blockSignals(True)
+        expected_content = ""
         if note is None:
+            self.append_log("准备刷新右侧内容: 空编辑器")
             self.title_edit.setText("")
             self.content_edit.clear()
             self.state.current_note_id = None
         else:
+            self.append_log(
+                "准备刷新右侧内容: "
+                f"note_id={note.id}, title={note.title!r}, api_chars={len(note.content or '')}"
+            )
             self.title_edit.setText(note.title)
             note_path = self._note_file_path(note.title)
             if note_path.is_file() and note_path.suffix.lower() == ".log":
                 mode = self._mode_from_filename(note.title)
-                self.content_edit.load_text_file_cached(note_path, mode=mode)
+                loaded = self.content_edit.load_text_file_cached(note_path, mode=mode)
+                expected_content = self.content_edit.toPlainText()
+                self.append_log(
+                    "日志文件缓存加载: "
+                    f"path={str(note_path)!r}, loaded={loaded}, chars={len(expected_content)}"
+                )
             else:
-                self._set_content_text(note.content)
+                expected_content = note.content or ""
+                self._set_content_text(expected_content)
             self.state.current_note_id = note.id
             # 根据文件扩展名自动切换高亮模式
             self._auto_set_highlight_mode(note.title)
         self.title_edit.blockSignals(False)
         self.content_edit.blockSignals(False)
+        self._set_right_panel_mode("empty" if note is None else "note")
+        self._verify_right_note_content(note, expected_content)
         self.state.dirty = False
         self._update_title()
         self._update_token_labels()
+
+    def _verify_right_note_content(self, note: NoteDto | None, expected_content: str) -> None:
+        """验证右侧编辑器是否已经显示目标笔记内容，并输出诊断日志。"""
+        actual_content = self.content_edit.toPlainText()
+        previous_sig = getattr(self, "_last_right_content_signature", None)
+        current_sig = (self.state.current_note_id, self.title_edit.text(), len(actual_content), actual_content[:80])
+        changed = previous_sig != current_sig
+        matches_expected = actual_content == (expected_content or "")
+        note_id = None if note is None else note.id
+        note_title = "" if note is None else note.title
+        self._last_right_content_signature = current_sig
+        parent_chain: list[str] = []
+        parent = self.content_edit.parentWidget()
+        while parent is not None and len(parent_chain) < 6:
+            name = parent.objectName() or parent.__class__.__name__
+            parent_chain.append(f"{name}:visible={parent.isVisible()},hidden={parent.isHidden()}")
+            parent = parent.parentWidget()
+        self.append_log(
+            "右侧内容验证: "
+            f"note_id={note_id}, title={note_title!r}, "
+            f"expected_chars={len(expected_content or '')}, actual_chars={len(actual_content)}, "
+            f"matches_expected={matches_expected}, changed={changed}, "
+            f"visible={self.content_edit.isVisible()}, hidden={self.content_edit.isHidden()}, "
+            f"parents={' > '.join(parent_chain)}, "
+            f"preview={actual_content[:60]!r}"
+        )
 
     def _mark_dirty(self) -> None:
         if self._ask_ai_mode:
@@ -2185,16 +2355,41 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             import traceback
             self.append_log(traceback.format_exc())
 
-    def append_log(self, message: str) -> None:
+    def append_log(self, message: str, level: str = "INFO") -> None:
+        level = (level or "INFO").upper()
+        if level == "DEBUG" and self._log_level != "DEBUG":
+            return
+        if level == "DEBUG":
+            logger.debug(message)
+        elif level in {"WARNING", "WARN"}:
+            logger.warning(message)
+        elif level == "ERROR":
+            logger.error(message)
+        else:
+            logger.info(message)
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_view.append_text_update_cache(
-            f"[{ts}] {message}\n",
-            LOG_VIEW_CONTENT_CACHE_KEY,
-        )
-        # 滚动到底部
-        scrollbar = self.log_view.verticalScrollBar()
-        if scrollbar:
-            scrollbar.setValue(scrollbar.maximum())
+        if self._qt_is_valid(getattr(self, "log_view", None)):
+            self.log_view.append_text_update_cache(
+                f"[{ts}] [{level}] {message}\n",
+                LOG_VIEW_CONTENT_CACHE_KEY,
+            )
+            # 滚动到底部
+            scrollbar = self.log_view.verticalScrollBar()
+            if scrollbar:
+                scrollbar.setValue(scrollbar.maximum())
+
+    def append_debug_log(self, message: str) -> None:
+        self.append_log(message, level="DEBUG")
+
+    def _append_exception_log(self, title: str) -> None:
+        detail = traceback.format_exc().rstrip()
+        self.append_log(f"{title}:\n{detail}")
+
+    def _log_unhandled_exception(self, exc_type, exc_value, exc_traceback) -> None:
+        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback)).rstrip()
+        self.append_log(f"未捕获异常:\n{detail}")
+        if getattr(self, "_previous_excepthook", None) is not None:
+            self._previous_excepthook(exc_type, exc_value, exc_traceback)
 
     def _sort_notes(self, notes: list[NoteDto]) -> list[NoteDto]:
         fav_rank = {nid: idx for idx, nid in enumerate(self._favorite_order)}
@@ -2367,14 +2562,16 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _new_ai_session(self, select: bool = True) -> AiSession:
         # 如果会话数量超过10个，删除最旧的会话
         if len(self._ai_sessions) >= 10:
+            self.append_log("AI 会话超过上限，准备删除最旧会话")
             self._remove_oldest_ai_session()
-        
+
         sid = str(QtCore.QDateTime.currentMSecsSinceEpoch())
         title = f"问AI {len(self._ai_sessions) + 1}"
         sess = AiSession(session_id=sid, title=title, messages=[])
         self._ai_sessions[sid] = sess
         if select:
             self._current_ai_session_id = sid
+        self.append_log(f"创建 AI 会话: {sid} / {title} / select={select}")
         # 创建标签页
         self._create_ai_tab(sess)
         self._save_settings()
@@ -2523,9 +2720,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if self.ai_tabs.count() == 0:
             self._ask_ai_mode = False
             self._current_ai_session_id = None
-            self.ai_tabs.hide()
-            self.content_edit.show()
-            self.ai_answer_edit.hide()
             self._set_editor(None)
         self._save_settings()
 
@@ -2622,6 +2816,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if session_id and session_id in self._ai_sessions:
             self._current_ai_session_id = session_id
             session = self._ai_sessions[session_id]
+            # 切换标签页时同步刷新当前页内容，避免右侧显示旧会话内容
+            self._update_ai_tab_content(session)
             # 更新标题编辑框
             self.title_edit.blockSignals(True)
             self.title_edit.setText(session.title)
