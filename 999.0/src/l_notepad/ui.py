@@ -7,6 +7,7 @@ import sys
 import json
 import os
 import re
+import ctypes
 import threading
 import urllib.error
 import urllib.request
@@ -24,13 +25,14 @@ from .api_client import ApiError, NotepadApi, NoteDto
 from l_qt_wgt_lib.smart_widget import (
     CodeEditorWidget,
 )
+from l_qt_wgt_lib.tray_window import TrayAwareMixin
 
 
 SILICONFLOW_URL = "https://api.siliconflow.cn/v1/chat/completions"
 SILICONFLOW_MODELS_URL = "https://api.siliconflow.cn/v1/models"
 SILICONFLOW_PRICING_URL = "https://www.siliconflow.com/pricing"
 DEFAULT_SILICONFLOW_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-DEFAULT_MODEL_PRESETS = [
+SILICONFLOW_MODELS = [
     "Qwen/Qwen2.5-7B-Instruct",
     "Qwen/Qwen2.5-72B-Instruct",
     "deepseek-ai/DeepSeek-V4-Flash",
@@ -40,6 +42,27 @@ SILICONFLOW_API_KEY = os.environ.get(
     "SILICONFLOW_API_KEY",
     "sk-gzwtmzfhglvibdbvrttmsuuqsyyjxghxlxzdhubdefmshqoi",
 )
+
+ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+ZHIPU_MODELS_URL = "https://open.bigmodel.cn/api/paas/v4/models"
+DEFAULT_ZHIPU_MODEL = "glm-4-flash"
+ZHIPU_MODELS = [
+    "glm-4-flash",
+    "glm-4-air",
+    "glm-4-plus",
+    "glm-4-long",
+]
+DEFAULT_ZHIPU_KEY = "263c58d09135c4f088b0d436e3b89bfb.hXFGig2ucu4xe5PT"
+ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", DEFAULT_ZHIPU_KEY)
+
+DEFAULT_MODEL_PRESETS = SILICONFLOW_MODELS
+
+# AI 提供商配置：{provider_name: (url, api_key, models, default_model)}
+AI_PROVIDERS: dict[str, tuple[str, str, list[str], str]] = {
+    "SiliconFlow": (SILICONFLOW_URL, SILICONFLOW_API_KEY, SILICONFLOW_MODELS, DEFAULT_SILICONFLOW_MODEL),
+    "智谱 Zhipu": (ZHIPU_URL, ZHIPU_API_KEY, ZHIPU_MODELS, DEFAULT_ZHIPU_MODEL),
+}
+DEFAULT_PROVIDER = "SiliconFlow"
 ASK_AI_ITEM_ID = "__ask_ai__"
 ASK_AI_SESSION_PREFIX = "__ask_ai_session__:"
 EXTERNAL_FILE_PREFIX = "__external_file__:"
@@ -66,7 +89,7 @@ def _load_stylesheet() -> str:
 _AI_PROMPT_PLACEHOLDER = (
     '在这里输入问题，然后点击"问AI"。\n\n'
     "支持多会话与上下文记忆。\n"
-    "模型：千问 / SiliconFlow。"
+    "支持模型：硅基流动 SiliconFlow / 智谱 Zhipu。"
 )
 _AI_ANSWER_PLACEHOLDER = "AI 回答会显示在这里（支持多会话上下文）"
 
@@ -106,11 +129,13 @@ def _apply_text_edit_appearance(
         wrap_mode = source.lineWrapMode()
         read_only = source.isReadOnly()
         accept_drops = source.editor().acceptDrops()
+        size_policy = source.sizePolicy()
     else:
         placeholder = source.placeholderText()
         wrap_mode = source.lineWrapMode()
         read_only = source.isReadOnly()
         accept_drops = source.acceptDrops()
+        size_policy = source.sizePolicy()
     editor.clear()
     editor.setLineWrapMode(_plain_text_line_wrap_mode(wrap_mode))
     editor.setReadOnly(read_only)
@@ -118,6 +143,8 @@ def _apply_text_edit_appearance(
         editor.setAcceptDrops(True)
     # 正文为空；placeholder 仅作灰色提示，不写入文档
     editor.setPlaceholderText(placeholder)
+    # 继承尺寸策略，确保撑满父布局
+    editor.setSizePolicy(size_policy)
 
 
 def replace_text_edit_with_code_editor(
@@ -130,8 +157,31 @@ def replace_text_edit_with_code_editor(
     new_editor = CodeEditorWidget(parent)
     new_editor.setObjectName(obj_name)
     _apply_text_edit_appearance(new_editor, old_widget)
+    
     if layout is not None:
-        layout.replaceWidget(old_widget, new_editor)
+        # 查找旧 widget 在布局中的索引和属性
+        index = -1
+        stretch = 0
+        alignment = 0
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.widget() is old_widget:
+                index = i
+                stretch = layout.stretch(i)
+                alignment = layout.alignment() if hasattr(layout, 'alignment') else 0
+                break
+        
+        # 移除旧 widget 并插入新 widget
+        if index >= 0:
+            layout.removeWidget(old_widget)
+            # 根据布局类型插入到正确位置
+            if isinstance(layout, QtWidgets.QVBoxLayout) or isinstance(layout, QtWidgets.QHBoxLayout):
+                layout.insertWidget(index, new_editor, stretch)
+            else:
+                layout.addWidget(new_editor)
+        else:
+            layout.replaceWidget(old_widget, new_editor)
+    
     old_widget.deleteLater()
     return new_editor
 
@@ -179,18 +229,21 @@ class PriceBridge(QtCore.QObject):
     finished = QtCore.Signal(bool, object)
 
 
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, api: NotepadApi, restart_callback=None, hotkey_interval_callback=None) -> None:
+class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
+    def __init__(self, api: NotepadApi, restart_callback=None, hotkey_interval_callback=None, hotkey_key_callback=None) -> None:
         super().__init__()
         self.api = api
         self._restart_callback = restart_callback
         self._hotkey_interval_callback = hotkey_interval_callback
+        self._hotkey_key_callback = hotkey_key_callback
         self.state = UiState()
         self._allow_close = False
         self._settings = QtCore.QSettings("Lugwit", "l_notepad_pc")
         self._favorite_order: list[int] = []
         self._last_open_note_id: int | None = None
-        self._selected_ai_model = DEFAULT_SILICONFLOW_MODEL
+        # 从设置中加载 AI 模型，如果保存过则使用保存的值
+        saved_model = self._settings.value("ai/model", "")
+        self._selected_ai_model = saved_model if saved_model else DEFAULT_SILICONFLOW_MODEL
         self._model_prices: dict[str, ModelPrice] = {}
         self._ai_input_tokens = 0
         self._ai_output_tokens = 0
@@ -240,6 +293,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.search_edit = self.findChild(QtWidgets.QLineEdit, "search_edit")
         self.notes_list = self.findChild(QtWidgets.QListWidget, "notes_list")
         self.title_edit = self.findChild(QtWidgets.QLineEdit, "title_edit")
+        self.provider_combo = self.findChild(QtWidgets.QComboBox, "provider_combo")
+        self.label_model = self.findChild(QtWidgets.QLabel, "label_model")
         self.model_combo = self.findChild(QtWidgets.QComboBox, "model_combo")
         self.btn_refresh_models = self.findChild(QtWidgets.QPushButton, "btn_refresh_models")
         self.label_input_tokens = self.findChild(QtWidgets.QLabel, "label_input_tokens")
@@ -257,7 +312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_favorite = self.findChild(QtWidgets.QPushButton, "btn_favorite")
         self.btn_ai_ask = self.findChild(QtWidgets.QPushButton, "btn_ai_ask")
         self.btn_restart = self.findChild(QtWidgets.QPushButton, "btn_restart")
-        self.btn_ctrl_interval = self.findChild(QtWidgets.QPushButton, "btn_ctrl_interval")
+        self.btn_hotkey = self.findChild(QtWidgets.QPushButton, "btn_hotkey")
         self.log_view = self.findChild(QtWidgets.QTextEdit, "log_view")
         self.help_view = self.findChild(QtWidgets.QTextEdit, "help_view")
         splitter = self.findChild(QtWidgets.QSplitter, "splitter_main")
@@ -270,6 +325,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.search_edit,
             self.notes_list,
             self.title_edit,
+            self.provider_combo,
+            self.label_model,
             self.model_combo,
             self.btn_refresh_models,
             self.label_input_tokens,
@@ -286,7 +343,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_favorite,
             self.btn_ai_ask,
             self.btn_restart,
-            self.btn_ctrl_interval,
+            self.btn_hotkey,
             self.log_view,
             self.ai_tabs,
         ]
@@ -302,6 +359,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.help_view is not None:
             self.help_view = replace_text_edit_with_code_editor(self.help_view, "HelpViewer")
             self.help_view.setReadOnly(True)
+            # 确保 help_view 撑满父布局
+            self.help_view.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
             self._load_help_page()
         assert self.ai_tabs is not None
         self._ai_tab_template_widget = self.ai_tabs.widget(0)
@@ -355,8 +417,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tabs.currentChanged.connect(self._on_main_tab_changed)
 
         self.title_edit.textEdited.connect(self._mark_dirty)
-        self.model_combo.clear()
-        self.model_combo.addItems(DEFAULT_MODEL_PRESETS)
+        # 初始化提供商选择
+        self.provider_combo.clear()
+        for provider_name in AI_PROVIDERS:
+            self.provider_combo.addItem(provider_name)
+        saved_provider = self._settings.value("ai/provider", DEFAULT_PROVIDER)
+        if saved_provider in AI_PROVIDERS:
+            self.provider_combo.setCurrentText(saved_provider)
+        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
+        # 初始化模型列表
+        self._update_model_list_for_provider(self.provider_combo.currentText())
         self.model_combo.setCurrentText(self._selected_ai_model)
         self.model_combo.currentTextChanged.connect(self._on_ai_model_changed)
         self.btn_refresh_models.clicked.connect(self._refresh_ai_models)
@@ -400,7 +470,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_favorite.clicked.connect(self._toggle_favorite_current)
         self.btn_ai_ask.clicked.connect(self._ask_ai)
         self.btn_restart.clicked.connect(self._restart_app)
-        self.btn_ctrl_interval.clicked.connect(self._configure_ctrl_double_interval)
+        self.btn_hotkey.clicked.connect(self._open_hotkey_settings)
 
         self.log_view.setObjectName("LogViewer")
         self._apply_text_font_size()
@@ -424,6 +494,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_official_prices()
         # 恢复 AI 标签页
         self._restore_ai_tabs()
+        # 初始状态下隐藏 AI 相关控件（因为 _ask_ai_mode = False）
+        if self.provider_combo:
+            self.provider_combo.hide()
+        if self.label_model:
+            self.label_model.hide()
+        if self.model_combo:
+            self.model_combo.hide()
+        if self.btn_refresh_models:
+            self.btn_refresh_models.hide()
+        if self.label_input_tokens:
+            self.label_input_tokens.hide()
+        if self.label_output_tokens:
+            self.label_output_tokens.hide()
+        if self.label_cost:
+            self.label_cost.hide()
+        if self.label_price_source:
+            self.label_price_source.hide()
         self.refresh_notes()
         self._initializing = False
         self.append_log("日志窗口已初始化")
@@ -1160,6 +1247,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_favorite.setEnabled(False)
         self.btn_new.setEnabled(True)
         # 显示 AI 相关的 UI 组件
+        if self.provider_combo:
+            self.provider_combo.show()
+        if self.label_model:
+            self.label_model.show()
         if self.model_combo:
             self.model_combo.show()
         if self.btn_refresh_models:
@@ -1205,12 +1296,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if content_edit is None:
             return
         prompt = content_edit.toPlainText().strip()
-        model = self.model_combo.currentText().strip() or DEFAULT_SILICONFLOW_MODEL
+        provider_name = self.provider_combo.currentText()
+        if provider_name not in AI_PROVIDERS:
+            provider_name = DEFAULT_PROVIDER
+        api_url, api_key, _, default_model = AI_PROVIDERS[provider_name]
+        model = self.model_combo.currentText().strip() or default_model
         if not prompt:
             self.status.showMessage("请输入问题", 2500)
             return
-        if not SILICONFLOW_API_KEY:
-            self.status.showMessage("未配置 SiliconFlow API Key", 5000)
+        if not api_key:
+            self.status.showMessage(f"未配置 {provider_name} API Key", 5000)
             return
 
         self._ai_request_seq += 1
@@ -1242,11 +1337,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 ] + history + [{"role": "user", "content": prompt}],
             }
             req = urllib.request.Request(
-                SILICONFLOW_URL,
+                api_url,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                 },
                 method="POST",
             )
@@ -1345,6 +1440,24 @@ class MainWindow(QtWidgets.QMainWindow):
             f"(入 {price.currency}{input_cost:.6f} / 出 {price.currency}{output_cost:.6f})"
         )
 
+    def _update_model_list_for_provider(self, provider_name: str) -> None:
+        """根据提供商更新模型列表。"""
+        if provider_name not in AI_PROVIDERS:
+            provider_name = DEFAULT_PROVIDER
+        _, _, models, default_model = AI_PROVIDERS[provider_name]
+        self.model_combo.clear()
+        self.model_combo.addItems(models)
+        self.model_combo.setCurrentText(default_model)
+
+    def _on_provider_changed(self, provider_name: str) -> None:
+        """提供商切换时更新模型列表并保存设置。"""
+        if provider_name not in AI_PROVIDERS:
+            return
+        self._settings.setValue("ai/provider", provider_name)
+        self._settings.sync()
+        self._update_model_list_for_provider(provider_name)
+        self.append_log(f"AI提供商已切换：{provider_name}")
+
     def _on_ai_model_changed(self, model: str) -> None:
         model = model.strip()
         if not model:
@@ -1355,6 +1468,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(f"AI模型已选择：{model}")
 
     def _refresh_ai_models(self) -> None:
+        provider_name = self.provider_combo.currentText()
+        if provider_name != "SiliconFlow":
+            self.status.showMessage(f"刷新模型列表仅支持 SiliconFlow，{provider_name} 请使用预设列表", 4000)
+            return
         if not SILICONFLOW_API_KEY:
             self.status.showMessage("未配置 SiliconFlow API Key", 5000)
             return
@@ -1580,6 +1697,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_delete.setEnabled(True)
         self.btn_favorite.setEnabled(True)
         # 隐藏 AI 相关的 UI 组件
+        if self.provider_combo:
+            self.provider_combo.hide()
+        if self.label_model:
+            self.label_model.hide()
         if self.model_combo:
             self.model_combo.hide()
         if self.btn_refresh_models:
@@ -1633,10 +1754,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._save_settings()
             event.accept()
             return
-        # UX requirement: close button hides to system tray (no taskbar entry).
         self._save_settings()
+        self.save_window_position()
         self.hide()
         event.ignore()
+
+    def on_tray_message_log(self, message: str) -> None:
+        self.append_log(message)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         if event.type() == QtCore.QEvent.Type.WindowStateChange:
@@ -1885,33 +2009,96 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_error(self, message: str) -> None:
         QtWidgets.QMessageBox.critical(self, "错误", message)
 
-    def _configure_ctrl_double_interval(self) -> None:
-        current_raw = self._settings.value("hotkey/double_ctrl_max_gap_sec", "0.15")
+    def _open_hotkey_settings(self) -> None:
+        """打开快捷键设置对话框。"""
+        from .local_main import HOTKEY_OPTIONS, DEFAULT_HOTKEY_KEY
+
+        current_gap_raw = self._settings.value("hotkey/double_ctrl_max_gap_sec", "0.15")
         try:
-            current = float(str(current_raw))
+            current_gap = float(str(current_gap_raw))
         except Exception:
-            current = 0.15
-        value, ok = QtWidgets.QInputDialog.getDouble(
-            self,
-            "设置 Ctrl 双击间隔",
-            "Ctrl 双击最大间隔（秒）:",
-            current,
-            0.08,
-            1.00,
-            2,
+            current_gap = 0.15
+
+        current_key = str(self._settings.value("hotkey/double_key", DEFAULT_HOTKEY_KEY))
+        if current_key not in HOTKEY_OPTIONS:
+            current_key = DEFAULT_HOTKEY_KEY
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("快捷键设置")
+        dialog.resize(380, 220)
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        # 热键选择
+        key_layout = QtWidgets.QHBoxLayout()
+        key_layout.addWidget(QtWidgets.QLabel("触发按键:"))
+        key_combo = QtWidgets.QComboBox()
+        for key_id, (_, display_name) in HOTKEY_OPTIONS.items():
+            key_combo.addItem(f"双击 {display_name}", key_id)
+        idx = key_combo.findData(current_key)
+        if idx >= 0:
+            key_combo.setCurrentIndex(idx)
+        key_layout.addWidget(key_combo, 1)
+        layout.addLayout(key_layout)
+
+        # 双击间隔
+        gap_layout = QtWidgets.QHBoxLayout()
+        gap_layout.addWidget(QtWidgets.QLabel("双击最大间隔（秒）:"))
+        gap_spin = QtWidgets.QDoubleSpinBox()
+        gap_spin.setRange(0.08, 1.00)
+        gap_spin.setDecimals(2)
+        gap_spin.setSingleStep(0.05)
+        gap_spin.setValue(current_gap)
+        gap_layout.addWidget(gap_spin)
+        layout.addLayout(gap_layout)
+
+        # 提示
+        hint = QtWidgets.QLabel(
+            "说明：连按两次选定按键可将窗口前置。\n"
+            "间隔值越小，触发越灵敏；越大越不容易误触。"
         )
-        if not ok:
+        hint.setStyleSheet("color: gray; font-size: 12px;")
+        layout.addWidget(hint)
+
+        layout.addStretch()
+
+        # 按钮
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addStretch()
+        btn_ok = QtWidgets.QPushButton("确定")
+        btn_cancel = QtWidgets.QPushButton("取消")
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        btn_ok.clicked.connect(dialog.accept)
+        btn_cancel.clicked.connect(dialog.reject)
+
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        value = max(0.08, min(1.00, float(value)))
-        self._settings.setValue("hotkey/double_ctrl_max_gap_sec", f"{value:.2f}")
-        self._settings.sync()
-        if self._hotkey_interval_callback is not None:
-            try:
-                self._hotkey_interval_callback(value)
-            except Exception as exc:
-                self.append_log(f"更新 Ctrl 双击间隔失败: {exc}")
-        self.status.showMessage(f"Ctrl 双击间隔已设置为 {value:.2f}s", 3000)
-        self.append_log(f"Ctrl 双击间隔已更新: {value:.2f}s")
+
+        # 保存间隔
+        new_gap = max(0.08, min(1.00, gap_spin.value()))
+        new_key = key_combo.currentData()
+
+        changed = False
+        if abs(new_gap - current_gap) >= 0.001:
+            self._settings.setValue("hotkey/double_ctrl_max_gap_sec", f"{new_gap:.2f}")
+            if self._hotkey_interval_callback is not None:
+                self._hotkey_interval_callback(new_gap)
+            self.append_log(f"双击间隔已更新: {new_gap:.2f}s")
+            changed = True
+
+        if new_key != current_key:
+            self._settings.setValue("hotkey/double_key", new_key)
+            if self._hotkey_key_callback is not None:
+                self._hotkey_key_callback(new_key)
+            display_name = HOTKEY_OPTIONS.get(new_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[1]
+            self.append_log(f"热键已切换为: 双击 {display_name}")
+            changed = True
+
+        if changed:
+            self._settings.sync()
+            self.status.showMessage("快捷键设置已保存", 3000)
 
     def _update_title(self) -> None:
         suffix = " *" if self.state.dirty else ""
@@ -1927,6 +2114,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bring_to_front()
 
     def _bring_to_front(self) -> None:
+        is_hidden = self.isHidden()
+        is_minimized = bool(self.windowState() & QtCore.Qt.WindowState.WindowMinimized)
+        self.append_log(f"_bring_to_front: hidden={is_hidden}, minimized={is_minimized}, pos={self.pos().x()},{self.pos().y()}")
+        if hasattr(self, "_saved_pos"):
+            self.move(self._saved_pos)
+            self.append_log(f"恢复到保存位置: {self._saved_pos.x()},{self._saved_pos.y()}")
+        self.show()
         self.showNormal()
         self.setWindowState(
             (self.windowState() & ~QtCore.Qt.WindowState.WindowMinimized)
@@ -1934,6 +2128,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.raise_()
         self.activateWindow()
+        self.append_log(f"show 后: hidden={self.isHidden()}, visible={self.isVisible()}, pos={self.pos().x()},{self.pos().y()}")
         if sys.platform != "win32":
             return
         try:
@@ -1952,8 +2147,8 @@ class MainWindow(QtWidgets.QMainWindow):
             user32.SetWindowPos(hwnd, hwnd_notopmost, 0, 0, 0, 0, flags)
             user32.SetForegroundWindow(hwnd)
             self.append_log("已调用 Windows 前台显示逻辑")
-        except Exception:
-            self.append_log("Windows 前台显示逻辑失败")
+        except Exception as e:
+            self.append_log(f"Windows 前台显示逻辑失败: {e}")
 
     def _help_markdown_path(self) -> Path:
         return Path(__file__).resolve().parent / "help.md"
@@ -1961,10 +2156,34 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_help_page(self) -> None:
         """从 help.md 加载帮助页（Markdown 预览 + HTML 缓存）。"""
         if self.help_view is None:
+            self.append_log("help_view 为 None，跳过加载")
             return
         path = self._help_markdown_path()
         fallback = "# L Notepad\n\n帮助文件未找到，请检查同目录下的 `help.md`。"
-        self.help_view.load_markdown_preview_file(path, fallback=fallback)
+        if not path.exists():
+            self.append_log(f"帮助文件不存在: {path}")
+        else:
+            self.append_log(f"加载帮助文件: {path}")
+            # 读取文件内容用于诊断
+            try:
+                content = path.read_text(encoding="utf-8")
+                self.append_log(f"帮助文件内容长度: {len(content)} 字符, {len(content.splitlines())} 行")
+            except Exception as e:
+                self.append_log(f"读取帮助文件失败: {e}")
+        try:
+            self.help_view.load_markdown_preview_file(path, fallback=fallback)
+            self.append_log("帮助页面加载完成")
+            # 检查 help_view 是否有内容
+            if hasattr(self.help_view, 'toPlainText'):
+                text = self.help_view.toPlainText()
+                self.append_log(f"help_view 文本长度: {len(text)} 字符")
+            if hasattr(self.help_view, 'toHtml'):
+                html = self.help_view.toHtml()
+                self.append_log(f"help_view HTML 长度: {len(html)} 字符")
+        except Exception as e:
+            self.append_log(f"帮助页面加载失败: {e}")
+            import traceback
+            self.append_log(traceback.format_exc())
 
     def append_log(self, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")

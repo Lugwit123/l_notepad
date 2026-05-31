@@ -171,6 +171,16 @@
                </widget>
               </item>
               <item>
+               <widget class="QComboBox" name="provider_combo">
+                <property name="minimumSize">
+                 <size>
+                  <width>120</width>
+                  <height>0</height>
+                 </size>
+                </property>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_model">
                 <property name="text">
                  <string>模型:</string>
@@ -186,7 +196,7 @@
                  </size>
                 </property>
                 <property name="editable">
-                 <bool>true</bool>
+                 <bool>false</bool>
                 </property>
                </widget>
               </item>
@@ -297,7 +307,7 @@
                    <string>在这里输入问题，然后点击&quot;问AI&quot;。
 
 支持多会话与上下文记忆。
-模型：千问 / SiliconFlow。</string>
+支持模型：硅基流动 / 智谱 Zhipu。</string>
                   </property>
                  </widget>
                 </item>
@@ -372,9 +382,9 @@
                </widget>
               </item>
               <item>
-               <widget class="QPushButton" name="btn_ctrl_interval">
+               <widget class="QPushButton" name="btn_hotkey">
                 <property name="text">
-                 <string>Ctrl双击间隔</string>
+                 <string>快捷键</string>
                 </property>
                </widget>
               </item>

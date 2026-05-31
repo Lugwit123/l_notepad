@@ -1,8 +1,4 @@
-rez env muse_python_api wuzu_utils anim_upload_muse_tool -- muse_cli upload --lib rsvs --type engineering --email wb.fengqingqing@mesg.corp.netease.com --category "备份资源包/J/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --source "J:/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --name "00_対比表" --upload-mode single-asset
+cmd.exe /c d:\td_depot\software\lugwit_syncplug\lugwit_insapp\trayapp\wuwo\wuwor.bat l_repo_sync_gui -- l_repo_sync_gui
 
-
-rez env muse_python_api wuzu_utils anim_upload_muse_tool -- muse_cli upload --lib rsvs --type engineering --email wb.fengqingqing@mesg.corp.netease.com --category "备份资源包/J/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --source "J:/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --name "00_対比表" --upload-mode single-asset
-
-
-
-rez env muse_python_api anim_upload_muse_tool -- python L:\temp\j_muse_backup\samba_to_muse\folder2muse_v2.py -muse_lib 'rsvs' -muse_category '备份资源包' -user 'qinjiaxin03@corp.netease.com' -folder_path 'J:/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表' -is_single_file_upload
+名称	PID	状态	用户名	CPU	内存(活动的专用工作集)	用户对象	命令行	操作系统上下文	特权	描述
+python.exe	2292	正在运行	Administrator	00 	596 K	1	"D:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\wuwo\py_312\python.exe"  "d:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\wuwo\py_312\Scripts\rez.exe" env l_scheduler -- l_scheduler_ui		否	Python

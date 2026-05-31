@@ -19,9 +19,17 @@ from .ui import MainWindow
 DOUBLE_CTRL_MIN_GAP_SEC = 0.05
 DOUBLE_CTRL_MAX_GAP_SEC = 0.15
 
+# 可选热键：名称 -> (vk_codes 集合, 显示名)
+HOTKEY_OPTIONS: dict[str, tuple[set[int], str]] = {
+    "Ctrl":   ({0x11, 0xA2, 0xA3}, "Ctrl"),
+    "Alt":    ({0x12, 0xA4, 0xA5}, "Alt"),
+    "Shift":  ({0x10, 0xA0, 0xA1}, "Shift"),
+}
+DEFAULT_HOTKEY_KEY = "Ctrl"
 
-class DoubleCtrlWatcher:
-    """Listary-style global double Ctrl watcher."""
+
+class DoubleKeyWatcher:
+    """Listary-style 全局双击按键监听，支持可配置热键。"""
 
     def __init__(
         self,
@@ -29,17 +37,20 @@ class DoubleCtrlWatcher:
         log_callback=None,
         min_gap_sec: float = DOUBLE_CTRL_MIN_GAP_SEC,
         max_gap_sec: float = DOUBLE_CTRL_MAX_GAP_SEC,
+        hotkey_key: str = DEFAULT_HOTKEY_KEY,
     ) -> None:
         self._callback = callback
         self._log_callback = log_callback
         self._min_gap_sec = float(min_gap_sec)
         self._max_gap_sec = float(max_gap_sec)
+        self._hotkey_key = hotkey_key
+        self._key_codes = HOTKEY_OPTIONS.get(hotkey_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[0]
         self._last_triggered_at = 0.0
         self._lock = threading.Lock()
         self._pending_logs: list[str] = []
         self._trigger_pending = False
-        self._ctrl_down = False
-        self._last_ctrl_press_at = 0.0
+        self._key_down = False
+        self._last_key_press_at = 0.0
         self._hook_id = None
         self._hook_proc = None
         self._hook_thread_id = 0
@@ -48,28 +59,35 @@ class DoubleCtrlWatcher:
         self._flush_timer.timeout.connect(self._flush_pending)
         self._flush_timer.start()
         if sys.platform == "win32":
+            key_name = HOTKEY_OPTIONS.get(hotkey_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[1]
             self._log(
-                "启动低级键盘 Hook 双击 Ctrl 监听，"
+                f"启动低级键盘 Hook 双击 {key_name} 监听，"
                 f"有效间隔 {self._min_gap_sec:.2f}-{self._max_gap_sec:.2f}s"
             )
             self._hook_thread = threading.Thread(target=self._run_keyboard_hook, daemon=True)
             self._hook_thread.start()
         else:
-            self._log("当前平台暂不支持双击 Ctrl 全局监听")
+            self._log("当前平台暂不支持全局双击热键监听")
 
     def _log(self, message: str) -> None:
         with self._lock:
             self._pending_logs.append(message)
 
-    def _on_ctrl_pressed(self) -> None:
+    def _on_key_pressed(self) -> None:
         now = time.monotonic()
-        gap = now - self._last_ctrl_press_at
-        self._log(f"Ctrl Hook 按下，距离上次 {gap:.2f}s")
-        if self._min_gap_sec <= gap <= self._max_gap_sec:
+        gap = now - self._last_key_press_at
+        key_name = HOTKEY_OPTIONS.get(self._hotkey_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[1]
+        in_range = self._min_gap_sec <= gap <= self._max_gap_sec
+        self._log(
+            f"{key_name} 按下，间隔 {gap:.3f}s"
+            f"（有效范围 {self._min_gap_sec:.2f}~{self._max_gap_sec:.2f}s"
+            f"{'✅ 命中' if in_range else '❌ 未命中'}）"
+        )
+        if in_range:
             self._trigger()
-            self._last_ctrl_press_at = 0.0
+            self._last_key_press_at = 0.0
         else:
-            self._last_ctrl_press_at = now
+            self._last_key_press_at = now
 
     def update_interval(self, max_gap_sec: float) -> None:
         try:
@@ -77,10 +95,22 @@ class DoubleCtrlWatcher:
         except Exception:
             return
         self._max_gap_sec = value
+        key_name = HOTKEY_OPTIONS.get(self._hotkey_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[1]
         self._log(
-            "双击 Ctrl 间隔已更新，"
+            f"双击 {key_name} 间隔已更新，"
             f"有效间隔 {self._min_gap_sec:.2f}-{self._max_gap_sec:.2f}s"
         )
+
+    def update_key(self, hotkey_key: str) -> None:
+        """更新监听的热键。"""
+        if hotkey_key not in HOTKEY_OPTIONS:
+            return
+        self._hotkey_key = hotkey_key
+        self._key_codes = HOTKEY_OPTIONS[hotkey_key][0]
+        self._key_down = False
+        self._last_key_press_at = 0.0
+        key_name = HOTKEY_OPTIONS[hotkey_key][1]
+        self._log(f"热键已切换为: 双击 {key_name}")
 
     def _run_keyboard_hook(self) -> None:
         try:
@@ -94,7 +124,6 @@ class DoubleCtrlWatcher:
             wm_syskeyup = 0x0105
             wm_quit = 0x0012
             hc_action = 0
-            ctrl_keys = {0x11, 0xA2, 0xA3}
 
             low_level_keyboard_proc = ctypes.WINFUNCTYPE(
                 wintypes.LPARAM,
@@ -144,12 +173,12 @@ class DoubleCtrlWatcher:
                     info = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                     vk = int(info.vkCode)
                     msg = int(w_param)
-                    if vk in ctrl_keys and msg in (wm_keydown, wm_syskeydown):
-                        if not self._ctrl_down:
-                            self._ctrl_down = True
-                            self._on_ctrl_pressed()
-                    elif vk in ctrl_keys and msg in (wm_keyup, wm_syskeyup):
-                        self._ctrl_down = False
+                    if vk in self._key_codes and msg in (wm_keydown, wm_syskeydown):
+                        if not self._key_down:
+                            self._key_down = True
+                            self._on_key_pressed()
+                    elif vk in self._key_codes and msg in (wm_keyup, wm_syskeyup):
+                        self._key_down = False
                 return user32.CallNextHookEx(self._hook_id, n_code, w_param, l_param)
 
             self._hook_proc = low_level_keyboard_proc(_proc)
@@ -163,7 +192,8 @@ class DoubleCtrlWatcher:
             if not self._hook_id:
                 self._log("低级键盘 Hook 注册失败")
                 return
-            self._log("低级键盘 Hook 注册成功，等待双击 Ctrl")
+            key_name = HOTKEY_OPTIONS.get(self._hotkey_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[1]
+            self._log(f"低级键盘 Hook 注册成功，等待双击 {key_name}")
 
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -180,7 +210,8 @@ class DoubleCtrlWatcher:
             self._log("快捷键触发过快，已防抖忽略")
             return
         self._last_triggered_at = now
-        self._log("双击 Ctrl 已触发")
+        key_name = HOTKEY_OPTIONS.get(self._hotkey_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[1]
+        self._log(f"双击 {key_name} 已触发")
         with self._lock:
             self._trigger_pending = True
 
@@ -426,17 +457,27 @@ def main() -> int:
         max_gap_sec = DOUBLE_CTRL_MAX_GAP_SEC
     max_gap_sec = max(DOUBLE_CTRL_MIN_GAP_SEC, min(1.0, max_gap_sec))
 
-    hotkey_ref: dict[str, DoubleCtrlWatcher] = {}
+    hotkey_key = str(settings.value("hotkey/double_key", DEFAULT_HOTKEY_KEY))
+    if hotkey_key not in HOTKEY_OPTIONS:
+        hotkey_key = DEFAULT_HOTKEY_KEY
+
+    hotkey_ref: dict[str, DoubleKeyWatcher] = {}
 
     def _update_hotkey_interval(value: float) -> None:
         watcher = hotkey_ref.get("watcher")
         if watcher is not None:
             watcher.update_interval(value)
 
+    def _update_hotkey_key(key: str) -> None:
+        watcher = hotkey_ref.get("watcher")
+        if watcher is not None:
+            watcher.update_key(key)
+
     win = MainWindow(
         api,
         restart_callback=_restart_process,
         hotkey_interval_callback=_update_hotkey_interval,
+        hotkey_key_callback=_update_hotkey_key,
     )
     tray = _setup_tray_icon(app, win, app.windowIcon())
     win.set_tray_icon(tray)
@@ -449,13 +490,14 @@ def main() -> int:
             QtCore.Q_ARG(str, message),
         )
 
-    hotkey = DoubleCtrlWatcher(
+    hotkey = DoubleKeyWatcher(
         lambda: QtCore.QMetaObject.invokeMethod(
             win, "show_from_hotkey", QtCore.Qt.ConnectionType.QueuedConnection
         ),
         log_callback=_append_log,
         min_gap_sec=DOUBLE_CTRL_MIN_GAP_SEC,
         max_gap_sec=max_gap_sec,
+        hotkey_key=hotkey_key,
     )
     hotkey_ref["watcher"] = hotkey
     win.show()
