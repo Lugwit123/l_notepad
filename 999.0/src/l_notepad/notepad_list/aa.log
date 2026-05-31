@@ -1,8 +1,17 @@
-rez env muse_python_api wuzu_utils anim_upload_muse_tool -- muse_cli upload --lib rsvs --type engineering --email wb.fengqingqing@mesg.corp.netease.com --category "备份资源包/J/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --source "J:/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --name "00_対比表" --upload-mode single-asset
+@rez-package-source/l_everything/999.0/src/l_everything/export_folders.py 添加一个命令行参数,可以升级之前的csv文件,就是
+之前的表格只有大小直接
+
+另外文件数是否也要显示文件数本级和文件总数
+
+菜单这一行显示 主机名 / 用户名；2) 悬停 tooltip 能看到网卡/IP 列表；3) 右键“复制本机信息”后粘贴是多行纯文本。
+我发现右键整个界面直接消失了
 
 
-rez env muse_python_api wuzu_utils anim_upload_muse_tool -- muse_cli upload --lib rsvs --type engineering --email wb.fengqingqing@mesg.corp.netease.com --category "备份资源包/J/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --source "J:/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表" --name "00_対比表" --upload-mode single-asset
+C:\Users\wb.fengqingqing\packages\anim_upload_muse_tool\999.0.0\src\anim_upload_muse_tool
 
 
+C:\Users\wb.fengqingqing\packages\pyblish_plugins_mayal\999.0.0\src\pyblish_plugins_maya
 
-rez env muse_python_api anim_upload_muse_tool -- python L:\temp\j_muse_backup\samba_to_muse\folder2muse_v2.py -muse_lib 'rsvs' -muse_category '备份资源包' -user 'qinjiaxin03@corp.netease.com' -folder_path 'J:/H55/包装视频/[联动片]死亡笔记联动视频/角色人设原画/角色人设原画/（1）DN＿設定画/01_キャラ表/00_対比表' -is_single_file_upload
+
+D:\TD_Depot\Wuzu_dev\pyblish_plugins_global\src
+C:\Users\wb.fengqingqing\packages\pyblish_plugins_global\999.0.0\src\pyblish_plugins_global

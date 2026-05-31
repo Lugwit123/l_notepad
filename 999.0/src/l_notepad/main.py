@@ -10,7 +10,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from .api_client import NotepadApi
 from .web_ui import WebNotepadWindow
@@ -25,6 +25,27 @@ def _set_windows_appid(appid: str) -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
     except Exception:
         pass
+
+
+def _acquire_single_instance_lock(app: QtWidgets.QApplication) -> QtCore.QLockFile | None:
+    """带 API 模式单实例：使用 QLockFile 避免多开。"""
+    data_dir_str = QtCore.QStandardPaths.writableLocation(
+        QtCore.QStandardPaths.AppDataLocation
+    )
+    base_dir = Path(data_dir_str or Path.home())
+    lock_path = base_dir / "l_notepad_with_api.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock = QtCore.QLockFile(str(lock_path))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(0):
+        QtWidgets.QMessageBox.warning(
+            None,
+            "L Notepad 已在运行",
+            "L Notepad（带 API 模式）已经有一个实例在运行，禁止多开。",
+        )
+        return None
+    return lock
 
 
 def _find_free_port() -> int:
@@ -82,6 +103,11 @@ def main() -> int:
         return 2
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    lock = _acquire_single_instance_lock(app)
+    if lock is None:
+        with suppress(Exception):
+            backend.terminate()
+        return 1
     icon_path = Path(__file__).resolve().parent / "static" / "favicon.svg"
     if icon_path.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))
@@ -95,6 +121,8 @@ def main() -> int:
         backend.terminate()
     with suppress(Exception):
         backend.wait(timeout=2)
+    if lock is not None:
+        lock.unlock()
     return int(code)
 
 
