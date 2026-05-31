@@ -11,8 +11,8 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .api_client import ApiError, NoteDto
 from . import file_store
+from .api_client import ApiError, NoteDto
 from .ui import MainWindow
 
 
@@ -431,9 +431,34 @@ class LocalNotepadApi:
         )
 
 
+def _acquire_single_instance_lock(app: QtWidgets.QApplication) -> QtCore.QLockFile | None:
+    """PC 模式单实例：使用 QLockFile 避免多开。"""
+    data_dir_str = QtCore.QStandardPaths.writableLocation(
+        QtCore.QStandardPaths.AppDataLocation
+    )
+    base_dir = Path(data_dir_str or Path.home())
+    lock_path = base_dir / "l_notepad_pc.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock = QtCore.QLockFile(str(lock_path))
+    # 不允许陈旧锁自动失效，要求用户手动清理。
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(0):
+        QtWidgets.QMessageBox.warning(
+            None,
+            "L Notepad 已在运行",
+            "L Notepad（PC 本地模式）已经有一个实例在运行，禁止多开。",
+        )
+        return None
+    return lock
+
+
 def main() -> int:
     _set_windows_appid("Lugwit.l_notepad.pc")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    lock = _acquire_single_instance_lock(app)
+    if lock is None:
+        return 1
     icon_path = Path(__file__).resolve().parent / "static" / "favicon.svg"
     if icon_path.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))
@@ -505,6 +530,8 @@ def main() -> int:
     hotkey.release()
     if tray is not None:
         tray.hide()
+    if lock is not None:
+        lock.unlock()
     return code
 
 

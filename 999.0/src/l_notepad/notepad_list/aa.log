@@ -2,3 +2,21 @@ cmd.exe /c d:\td_depot\software\lugwit_syncplug\lugwit_insapp\trayapp\wuwo\wuwor
 
 名称	PID	状态	用户名	CPU	内存(活动的专用工作集)	用户对象	命令行	操作系统上下文	特权	描述
 python.exe	2292	正在运行	Administrator	00 	596 K	1	"D:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\wuwo\py_312\python.exe"  "d:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\wuwo\py_312\Scripts\rez.exe" env l_scheduler -- l_scheduler_ui		否	Python
+
+@rez-package-source/l_everything/999.0/src/l_everything/export_folders.py 添加一个命令行参数,可以升级之前的csv文件,就是
+之前的表格只有大小直接
+
+另外文件数是否也要显示文件数本级和文件总数
+
+菜单这一行显示 主机名 / 用户名；2) 悬停 tooltip 能看到网卡/IP 列表；3) 右键"复制本机信息"后粘贴是多行纯文本。
+我发现右键整个界面直接消失了
+
+
+C:\Users\wb.fengqingqing\packages\anim_upload_muse_tool\999.0.0\src\anim_upload_muse_tool
+
+
+C:\Users\wb.fengqingqing\packages\pyblish_plugins_mayal\999.0.0\src\pyblish_plugins_maya
+
+
+D:\TD_Depot\Wuzu_dev\pyblish_plugins_global\src
+C:\Users\wb.fengqingqing\packages\pyblish_plugins_global\999.0.0\src\pyblish_plugins_global
