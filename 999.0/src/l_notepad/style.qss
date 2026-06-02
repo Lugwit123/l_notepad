@@ -125,6 +125,38 @@ QListWidget::item:selected {
   color: #FFFFFF;
 }
 
+/* 左侧文件树样式（文件名 + 日期换行） */
+QTreeWidget#notes_list {
+  background: rgba(9, 14, 24, 0.82);
+  border: 1px solid rgba(137, 221, 255, 0.10);
+  border-radius: 10px;
+  padding: 2px 2px 2px 3px;
+  outline: 0;
+}
+
+QTreeWidget#notes_list::item {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 1px 4px 1px 0px;
+  margin: 0px 2px 0px 0px;
+  min-height: 30px;
+}
+
+QTreeWidget#notes_list::item:hover {
+  background: rgba(255,255,255,0.055);
+}
+
+QTreeWidget#notes_list::item:selected {
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(77, 163, 255, 0.22), stop:1 rgba(125, 92, 255, 0.16));
+  border: 1px solid rgba(77, 163, 255, 0.40);
+  color: #FFFFFF;
+}
+
+QTreeWidget#notes_list::branch {
+  background: transparent;
+}
+
 QSplitter::handle {
   background: rgba(137, 221, 255, 0.06);
   margin: 8px 6px;

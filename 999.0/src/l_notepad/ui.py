@@ -242,6 +242,334 @@ class PriceBridge(QtCore.QObject):
     finished = QtCore.Signal(bool, object)
 
 
+# ---- 左侧文件树 delegate：将 "文件名\n日期" 分别绘制成两行不同颜色 ----
+
+class _NoteTreeItemDelegate(QtWidgets.QStyledItemDelegate):
+    """将 item 文本按换行符拆分成两行：第一行文件名粗体，第二行日期橙色。"""
+
+    _COLOR_MAIN = QtGui.QColor("#E9EEF5")
+    _COLOR_DATE = QtGui.QColor("#FFA657")
+    _COLOR_FOLDER = QtGui.QColor("#89DDFF")
+    _COLOR_ASK_AI = QtGui.QColor("#B794F4")
+    # 父级目录高亮叠加色（alpha 0.8）
+    _COLOR_PARENT_HIGHLIGHT = QtGui.QColor(77, 130, 220, 24)
+    # 标记 item 为“父级高亮”的自定义 role
+    _PARENT_HIGHLIGHT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 99
+
+    def paint(self, painter, option, index):
+        # 先绘制背景/选中等默认样式
+        opt_copy = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt_copy, index)
+        opt_copy.text = ""
+        style = option.widget.style() if option.widget else QtWidgets.QApplication.style()
+        style.drawControl(QtWidgets.QStyle.ControlElement.CE_ItemViewItem, opt_copy, painter, option.widget)
+
+        # 若 item 被标记为“父级高亮”，在默认背景之上叠加高亮色块
+        is_highlighted = bool(index.data(self._PARENT_HIGHLIGHT_ROLE))
+        if is_highlighted:
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.fillRect(option.rect, self._COLOR_PARENT_HIGHLIGHT)
+            painter.restore()
+
+        text = index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""
+        parts = text.split("\n") if isinstance(text, str) else [str(text)]
+        rect = option.rect
+        padding_left = 2
+        total_lines = len(parts)
+        # 紧凑行高：根据行数自适应
+        line_height = max(14, rect.height() // max(total_lines, 1))
+        x = rect.x() + padding_left
+        y = rect.y() + max(2, (rect.height() - line_height * total_lines) // 2)
+        for i, part in enumerate(parts):
+            font = QtGui.QFont(option.font)
+            if i == 0:
+                # 第一行：文件名
+                role = index.data(QtCore.Qt.ItemDataRole.UserRole) or ""
+                if isinstance(role, str) and role.startswith("__folder__:"):
+                    color = self._COLOR_FOLDER
+                elif role == ASK_AI_ITEM_ID:
+                    color = self._COLOR_ASK_AI
+                else:
+                    color = self._COLOR_MAIN
+                font.setBold(True)
+            else:
+                color = self._COLOR_DATE
+                font.setBold(False)
+                if font.pointSize() and font.pointSize() > 8:
+                    font.setPointSize(font.pointSize() - 2)
+            painter.save()
+            painter.setFont(font)
+            painter.setPen(QtGui.QPen(color))
+            line_rect = QtCore.QRect(x, y + i * line_height, rect.width() - padding_left - 4, line_height)
+            painter.drawText(
+                line_rect,
+                QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft,
+                part,
+            )
+            painter.restore()
+
+    def sizeHint(self, option, index):
+        base = super().sizeHint(option, index)
+        text = index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""
+        lines = text.split("\n") if isinstance(text, str) else [str(text)]
+        return QtCore.QSize(base.width(), max(32, len(lines) * 14 + 4))
+
+
+class _NoteTreeProxyStyle(QtWidgets.QProxyStyle):
+    """在深色主题下绘制树形层级指示线（虚线）。
+
+    重写 PE_IndicatorBranch：
+    - 先调用基类绘制折叠/展开箭头三角；
+    - 再叠加绘制层级指示线（天蓝淡色虚线）。
+    """
+
+    _LINE_COLOR = QtGui.QColor(137, 221, 255, 70)
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        if element != QtWidgets.QStyle.PrimitiveElement.PE_IndicatorBranch:
+            super().drawPrimitive(element, option, painter, widget)
+            return
+
+        flags = option.state
+        rect = option.rect
+        SF = QtWidgets.QStyle.StateFlag
+
+        # State_Children: 有子节点（需要画箭头）
+        # State_Open    : 展开
+        # State_Sibling : 当前节点下方还有兄弟节点（垂直线需要继续向下）
+        has_children = bool(flags & SF.State_Children)
+        has_sibling_below = bool(flags & SF.State_Sibling)
+
+        # 基类绘制箭头三角（仅对有子节点的项）
+        super().drawPrimitive(element, option, painter, widget)
+
+        if rect.width() <= 2 or rect.height() <= 2 or widget is None:
+            return
+
+        # 通过 indexAt 判断是否为根节点：根节点不画层级指示线
+        pos = QtCore.QPoint(rect.center().x(), rect.center().y())
+        index = widget.indexAt(pos)
+        if not index.isValid():
+            return
+        is_root = not index.parent().isValid()
+        if is_root:
+            return
+
+        painter.save()
+        pen = QtGui.QPen(self._LINE_COLOR)
+        pen.setStyle(QtCore.Qt.PenStyle.DotLine)
+        pen.setWidth(1)
+        painter.setPen(pen)
+
+        mid_x = rect.x() + rect.width() // 2
+        mid_y = rect.y() + rect.height() // 2
+
+        # 1) 垂直连接线
+        if has_sibling_below:
+            # 有兄弟在下方：竖线贯穿整个 rect
+            painter.drawLine(mid_x, rect.top(), mid_x, rect.bottom())
+        else:
+            # 无兄弟在下方（最后一项）：竖线仅上半部（L 形）
+            painter.drawLine(mid_x, rect.top(), mid_x, mid_y)
+
+        # 2) 水平连接线：子节点画从中部向右的横线
+        painter.drawLine(mid_x, mid_y, rect.right(), mid_y)
+
+        painter.restore()
+
+
+class RightPanel(QtWidgets.QWidget):
+    """右侧面板（代码构建），每次重建都会创建全新实例，规避 PySide6 中
+    QUiLoader 加载的 QMainWindow 被 C++ 层销毁导致的控件失效问题。
+
+    对应 main_window.ui 中 splitter_main 右侧的 right_panel 部分。
+    所有子控件均以属性暴露（title_edit、provider_combo、model_combo 等）。
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("right_panel")
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(12, 10, 12, 10)
+
+        # ---- 标题行：title_edit + provider_combo + label_model + model_combo + btn_refresh_models
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.setSpacing(8)
+
+        self.title_edit = QtWidgets.QLineEdit(self)
+        self.title_edit.setObjectName("title_edit")
+        self.title_edit.setPlaceholderText("标题")
+        title_row.addWidget(self.title_edit)
+
+        self.provider_combo = QtWidgets.QComboBox(self)
+        self.provider_combo.setObjectName("provider_combo")
+        self.provider_combo.setMinimumWidth(120)
+        title_row.addWidget(self.provider_combo)
+
+        self.label_model = QtWidgets.QLabel("模型:", self)
+        self.label_model.setObjectName("label_model")
+        title_row.addWidget(self.label_model)
+
+        self.model_combo = QtWidgets.QComboBox(self)
+        self.model_combo.setObjectName("model_combo")
+        self.model_combo.setMinimumWidth(260)
+        title_row.addWidget(self.model_combo)
+
+        self.btn_refresh_models = QtWidgets.QPushButton("刷新模型", self)
+        self.btn_refresh_models.setObjectName("btn_refresh_models")
+        title_row.addWidget(self.btn_refresh_models)
+        root.addLayout(title_row)
+
+        # ---- token 统计行
+        token_row = QtWidgets.QHBoxLayout()
+        token_row.setSpacing(8)
+
+        self.label_input_tokens = QtWidgets.QLabel("输入: 0 tokens", self)
+        self.label_input_tokens.setObjectName("label_input_tokens")
+        token_row.addWidget(self.label_input_tokens)
+
+        self.label_output_tokens = QtWidgets.QLabel("输出: 0 tokens", self)
+        self.label_output_tokens.setObjectName("label_output_tokens")
+        token_row.addWidget(self.label_output_tokens)
+
+        self.label_cost = QtWidgets.QLabel("费用: 价格未知", self)
+        self.label_cost.setObjectName("label_cost")
+        token_row.addWidget(self.label_cost)
+
+        self.label_price_source = QtWidgets.QLabel("价格: 未加载", self)
+        self.label_price_source.setObjectName("label_price_source")
+        token_row.addWidget(self.label_price_source)
+
+        token_row.addStretch()
+
+        self.tab_count = QtWidgets.QLabel("Tab: 0", self)
+        self.tab_count.setObjectName("tab_count")
+        token_row.addWidget(self.tab_count)
+        root.addLayout(token_row)
+
+        # ---- AI 标签页（含 Template 标签）
+        self.ai_tabs = QtWidgets.QTabWidget(self)
+        self.ai_tabs.setObjectName("ai_tabs")
+        self.ai_tabs.setDocumentMode(True)
+        self.ai_tabs.setTabsClosable(True)
+
+        self._ai_tab_template_widget = QtWidgets.QWidget()
+        self._ai_tab_template_widget.setObjectName("ai_tab_template")
+        tpl = QtWidgets.QVBoxLayout(self._ai_tab_template_widget)
+        tpl.setSpacing(10)
+        tpl.setContentsMargins(10, 10, 10, 10)
+
+        self._ai_template_content_edit = CodeEditorWidget(self._ai_tab_template_widget)
+        self._ai_template_content_edit.setObjectName("CodeEditor")
+        self._ai_template_content_edit.setPlaceholderText(
+            '在这里输入问题，然后点击"问AI"。\n\n'
+            "支持多会话与上下文记忆。\n支持模型：硅基流动 / 智谱 Zhipu。"
+        )
+        tpl.addWidget(self._ai_template_content_edit)
+
+        self._ai_template_answer_edit = CodeEditorWidget(self._ai_tab_template_widget)
+        self._ai_template_answer_edit.setObjectName("AiAnswerViewer")
+        self._ai_template_answer_edit.setReadOnly(True)
+        self._ai_template_answer_edit.setPlaceholderText("AI 回答会显示在这里（支持多会话上下文）")
+        tpl.addWidget(self._ai_template_answer_edit)
+
+        self.ai_tabs.addTab(self._ai_tab_template_widget, "Template")
+        root.addWidget(self.ai_tabs)
+
+        # ---- content_edit（普通笔记 / 外部文件 / 空态）
+        self.content_edit = CodeEditorWidget(self)
+        self.content_edit.setObjectName("content_edit")
+        self.content_edit.setAcceptDrops(True)
+        root.addWidget(self.content_edit)
+
+        # ---- ai_answer_edit（旧版 AI 回答区，默认隐藏）
+        self.ai_answer_edit = CodeEditorWidget(self)
+        self.ai_answer_edit.setObjectName("ai_answer_edit")
+        self.ai_answer_edit.setVisible(False)
+        self.ai_answer_edit.setReadOnly(True)
+        self.ai_answer_edit.setPlaceholderText("AI 回答会显示在这里")
+        root.addWidget(self.ai_answer_edit)
+
+        # ---- 操作按钮行
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_new = QtWidgets.QPushButton("新建", self)
+        self.btn_new.setObjectName("btn_new")
+        btn_row.addWidget(self.btn_new)
+
+        self.btn_save = QtWidgets.QPushButton("保存", self)
+        self.btn_save.setObjectName("btn_save")
+        btn_row.addWidget(self.btn_save)
+
+        self.btn_delete = QtWidgets.QPushButton("删除", self)
+        self.btn_delete.setObjectName("btn_delete")
+        btn_row.addWidget(self.btn_delete)
+
+        self.btn_restart = QtWidgets.QPushButton("重启", self)
+        self.btn_restart.setObjectName("btn_restart")
+        btn_row.addWidget(self.btn_restart)
+
+        self.btn_hotkey = QtWidgets.QPushButton("快捷键", self)
+        self.btn_hotkey.setObjectName("btn_hotkey")
+        btn_row.addWidget(self.btn_hotkey)
+
+        btn_row.addStretch()
+
+        self.btn_ai_ask = QtWidgets.QPushButton("问AI", self)
+        self.btn_ai_ask.setObjectName("btn_ai_ask")
+        btn_row.addWidget(self.btn_ai_ask)
+        root.addLayout(btn_row)
+
+    # ---- 公共方法 -------------------------------------------------------
+
+    def attach_to_splitter(self, splitter: QtWidgets.QSplitter) -> None:
+        """把 right_panel 作为第二个子控件加入 splitter，并设置拉伸策略。"""
+        self.setParent(splitter)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+    def bind_to(self, mw: "MainWindow") -> None:
+        """将本实例的控件绑定到 MainWindow 属性，并记录到 _right_widget_refs。"""
+        mapping = {
+            "title_edit": self.title_edit,
+            "provider_combo": self.provider_combo,
+            "label_model": self.label_model,
+            "model_combo": self.model_combo,
+            "btn_refresh_models": self.btn_refresh_models,
+            "label_input_tokens": self.label_input_tokens,
+            "label_output_tokens": self.label_output_tokens,
+            "label_cost": self.label_cost,
+            "label_price_source": self.label_price_source,
+            "tab_count": self.tab_count,
+            "content_edit": self.content_edit,
+            "ai_answer_edit": self.ai_answer_edit,
+            "ai_tabs": self.ai_tabs,
+            "btn_new": self.btn_new,
+            "btn_save": self.btn_save,
+            "btn_delete": self.btn_delete,
+            "btn_ai_ask": self.btn_ai_ask,
+            "btn_restart": self.btn_restart,
+            "btn_hotkey": self.btn_hotkey,
+        }
+        for key, widget in mapping.items():
+            setattr(mw, key, widget)
+            mw._right_widget_refs[key] = widget
+
+        # MainWindow 还需引用 ai_tab_template 相关的隐藏控件（供 ai 标签页新建复用）
+        mw._ai_tab_template_widget = self._ai_tab_template_widget
+        mw._ai_template_content_edit = self._ai_template_content_edit
+        mw._ai_template_answer_edit = self._ai_template_answer_edit
+
+        # 隐藏 Template 标签页并移除它（保留模板控件引用供后续使用）
+        tpl_index = mw.ai_tabs.indexOf(self._ai_tab_template_widget)
+        if tpl_index >= 0:
+            mw.ai_tabs.removeTab(tpl_index)
+        self._ai_tab_template_widget.hide()
+
+
 class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def __init__(self, api: NotepadApi, restart_callback=None, hotkey_interval_callback=None, hotkey_key_callback=None) -> None:
         super().__init__()
@@ -306,198 +634,139 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             ui_file.close()
         if loaded is None:
             raise RuntimeError(f"Failed to load ui file: {ui_path}")
-        self.setCentralWidget(loaded.findChild(QtWidgets.QWidget, "centralwidget"))
 
+        # 右侧面板由代码构建（RightPanel 类），每次切换文件时重建实例，
+        # 彻底规避旧版本中 QWidget 失效的问题。
+        _cw = loaded.findChild(QtWidgets.QWidget, "centralwidget")
+        self.setCentralWidget(_cw)
+        # loaded 的 C++ QMainWindow 在 setCentralWidget 后已不再需要，
+        # 显式删除避免 PySide6 的 Python 包装器干扰后续 findChild。
+        del loaded
+        import gc as _gc
+        _gc.collect()
+
+        # 通过 self.findChild 查找全部控件（centralwidget 已 reparent 到 self）
         self.tabs = self.findChild(QtWidgets.QTabWidget, "tabs")
         self.search_edit = self.findChild(QtWidgets.QLineEdit, "search_edit")
         self.notes_list = self.findChild(QtWidgets.QListWidget, "notes_list")
-        self.title_edit = self.findChild(QtWidgets.QLineEdit, "title_edit")
-        self.provider_combo = self.findChild(QtWidgets.QComboBox, "provider_combo")
-        self.label_model = self.findChild(QtWidgets.QLabel, "label_model")
-        self.model_combo = self.findChild(QtWidgets.QComboBox, "model_combo")
-        self.btn_refresh_models = self.findChild(QtWidgets.QPushButton, "btn_refresh_models")
-        self.label_input_tokens = self.findChild(QtWidgets.QLabel, "label_input_tokens")
-        self.label_output_tokens = self.findChild(QtWidgets.QLabel, "label_output_tokens")
-        self.label_cost = self.findChild(QtWidgets.QLabel, "label_cost")
-        self.label_price_source = self.findChild(QtWidgets.QLabel, "label_price_source")
-        self.tab_count = self.findChild(QtWidgets.QLabel, "tab_count")
-        self.content_edit = self.findChild(QtWidgets.QTextEdit, "content_edit")
-        self.ai_answer_edit = self.findChild(QtWidgets.QTextEdit, "ai_answer_edit")
-        self.ai_tabs = self.findChild(QtWidgets.QTabWidget, "ai_tabs")
-        self.btn_new = self.findChild(QtWidgets.QPushButton, "btn_new")
-        self.btn_save = self.findChild(QtWidgets.QPushButton, "btn_save")
-        self.btn_delete = self.findChild(QtWidgets.QPushButton, "btn_delete")
+        self.notes_tree = self.findChild(QtWidgets.QTreeWidget, "notes_list")
         self.btn_refresh = self.findChild(QtWidgets.QPushButton, "btn_refresh")
         self.btn_favorite = self.findChild(QtWidgets.QPushButton, "btn_favorite")
-        self.btn_ai_ask = self.findChild(QtWidgets.QPushButton, "btn_ai_ask")
-        self.btn_restart = self.findChild(QtWidgets.QPushButton, "btn_restart")
-        self.btn_hotkey = self.findChild(QtWidgets.QPushButton, "btn_hotkey")
         self.log_view = self.findChild(QtWidgets.QTextEdit, "log_view")
         self.help_view = self.findChild(QtWidgets.QTextEdit, "help_view")
+
         splitter = self.findChild(QtWidgets.QSplitter, "splitter_main")
-        if splitter is not None:
-            splitter.setStretchFactor(0, 0)
-            splitter.setStretchFactor(1, 1)
+        if splitter is None:
+            raise RuntimeError("main_window.ui missing splitter_main")
 
-        required_widgets = [
-            self.tabs,
-            self.search_edit,
-            self.notes_list,
-            self.title_edit,
-            self.provider_combo,
-            self.label_model,
-            self.model_combo,
-            self.btn_refresh_models,
-            self.label_input_tokens,
-            self.label_output_tokens,
-            self.label_cost,
-            self.label_price_source,
-            self.tab_count,
-            self.content_edit,
-            self.ai_answer_edit,
-            self.btn_new,
-            self.btn_save,
-            self.btn_delete,
-            self.btn_refresh,
-            self.btn_favorite,
-            self.btn_ai_ask,
-            self.btn_restart,
-            self.btn_hotkey,
-            self.log_view,
-            self.ai_tabs,
-        ]
-        if any(w is None for w in required_widgets):
-            raise RuntimeError("main_window.ui missing required widget objectName(s)")
-        assert self.tab_count is not None
-        self.tab_count.setText("Tab: 0")
+        # 移除 .ui 中原有的 right_panel（将由代码构建的 RightPanel 替代）
+        for _i in range(splitter.count()):
+            _w = splitter.widget(_i)
+            if _w is not None and _w.objectName() == "right_panel":
+                _w.setParent(None)
+                _w.deleteLater()
+                break
 
-        # 用 CodeEditorWidget 替换 .ui 中的 QTextEdit（笔记区 / 旧版 AI 回答区 / 日志）
-        self.content_edit = replace_text_edit_with_code_editor(self.content_edit, "CodeEditor")
-        self.ai_answer_edit = replace_text_edit_with_code_editor(self.ai_answer_edit, "AiAnswerViewer")
+        # 代码构建右侧面板
+        self._right_panel = RightPanel(self)
+        splitter.addWidget(self._right_panel)
+        splitter.setStretchFactor(0, 0)  # 左侧不拉伸（保持紧凑）
+        splitter.setStretchFactor(1, 1)  # 右侧占满剩余空间
+        # 初始宽度分配：左侧 ~180px，右侧按窗口宽度补
+        try:
+            total_w = splitter.width() or 900
+            left_w = min(200, max(170, int(total_w * 0.18)))
+            splitter.setSizes([left_w, max(100, total_w - left_w)])
+        except Exception:
+            splitter.setSizes([180, 720])
+        self._right_panel.bind_to(self)
+
+        # 用 CodeEditorWidget 替换 .ui 中的 QTextEdit（日志 / 帮助）
         self.log_view = replace_text_edit_with_code_editor(self.log_view, "LogViewer")
         if self.help_view is not None:
             self.help_view = replace_text_edit_with_code_editor(self.help_view, "HelpViewer")
             self.help_view.setReadOnly(True)
-            # 确保 help_view 撑满父布局
             self.help_view.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Expanding,
             )
             self._load_help_page()
-        assert self.ai_tabs is not None
-        self._ai_tab_template_widget = self.ai_tabs.widget(0)
-        self._ai_template_content_edit: CodeEditorWidget | None = None
-        self._ai_template_answer_edit: CodeEditorWidget | None = None
-        if self._ai_tab_template_widget is not None:
-            template_code = self._ai_tab_template_widget.findChild(QtWidgets.QTextEdit, "CodeEditor")
-            if template_code is not None:
-                self._ai_template_content_edit = replace_text_edit_with_code_editor(
-                    template_code, "CodeEditor"
-                )
-            template_answer = self._ai_tab_template_widget.findChild(
-                QtWidgets.QTextEdit, "AiAnswerViewer"
+
+        required_widgets = [
+            ("tabs", self.tabs),
+            ("search_edit", self.search_edit),
+            ("notes_list_or_tree", self.notes_list or self.notes_tree),
+            ("title_edit", self.title_edit),
+            ("provider_combo", self.provider_combo),
+            ("label_model", self.label_model),
+            ("model_combo", self.model_combo),
+            ("btn_refresh_models", self.btn_refresh_models),
+            ("label_input_tokens", self.label_input_tokens),
+            ("label_output_tokens", self.label_output_tokens),
+            ("label_cost", self.label_cost),
+            ("label_price_source", self.label_price_source),
+            ("tab_count", self.tab_count),
+            ("content_edit", self.content_edit),
+            ("ai_answer_edit", self.ai_answer_edit),
+            ("btn_new", self.btn_new),
+            ("btn_save", self.btn_save),
+            ("btn_delete", self.btn_delete),
+            ("btn_refresh", self.btn_refresh),
+            ("btn_favorite", self.btn_favorite),
+            ("btn_ai_ask", self.btn_ai_ask),
+            ("btn_restart", self.btn_restart),
+            ("btn_hotkey", self.btn_hotkey),
+            ("log_view", self.log_view),
+            ("ai_tabs", self.ai_tabs),
+        ]
+        missing = [name for name, w in required_widgets if w is None]
+        if missing:
+            raise RuntimeError(
+                f"main_window.ui missing required widget objectName(s): {missing}\n"
+                f"  ui_path: {ui_path} (exists={ui_path.exists()})"
             )
-            if template_answer is not None:
-                self._ai_template_answer_edit = replace_text_edit_with_code_editor(
-                    template_answer, "AiAnswerViewer"
-                )
-            self.ai_tabs.removeTab(0)
-            self._ai_tab_template_widget.hide()
+        assert self.tab_count is not None
+        self.tab_count.setText("Tab: 0")
 
         # 初始化 .ui 文件中的 "问AI" item data
-        if self.notes_list.count() > 0:
-            first_item = self.notes_list.item(0)
-            if first_item.text().startswith("问AI"):
-                first_item.setData(QtCore.Qt.ItemDataRole.UserRole, ASK_AI_ITEM_ID)
-                font = first_item.font()
-                font.setBold(True)
-                first_item.setFont(font)
-                first_item.setFlags(first_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
-                first_item.setSizeHint(QtCore.QSize(0, 36))
+        self._notes_tree_mode = self._qt_is_valid(getattr(self, "notes_tree", None))
+        if self._notes_tree_mode:
+            self._setup_notes_tree()
+        else:
+            if self.notes_list and self.notes_list.count() > 0:
+                first_item = self.notes_list.item(0)
+                if first_item.text().startswith("问AI"):
+                    first_item.setData(QtCore.Qt.ItemDataRole.UserRole, ASK_AI_ITEM_ID)
+                    font = first_item.font()
+                    font.setBold(True)
+                    first_item.setFont(font)
+                    first_item.setFlags(first_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsDragEnabled)
+                    first_item.setSizeHint(QtCore.QSize(0, 36))
+
+            if self.notes_list:
+                self.notes_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+            self.notes_list.itemSelectionChanged.connect(self._on_selection_changed)
+            self.notes_list.itemDoubleClicked.connect(self._rename_note_from_item)
+            self.notes_list.model().rowsMoved.connect(self._on_notes_rows_moved)
 
         self.search_edit.textChanged.connect(self._apply_filter)
-        if self.notes_list:
-            self.notes_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.notes_list.itemSelectionChanged.connect(self._on_selection_changed)
-        self.notes_list.itemDoubleClicked.connect(self._rename_note_from_item)
-        self.notes_list.model().rowsMoved.connect(self._on_notes_rows_moved)
 
-        # AI 标签页设置
-        self.ai_tabs.tabCloseRequested.connect(self._on_ai_tab_close_requested)
-        self.ai_tabs.currentChanged.connect(self._on_ai_tab_changed)
-        # 为标签栏添加右键菜单
-        self.ai_tabs.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
-        self.ai_tabs.customContextMenuRequested.connect(self._on_ai_tabs_context_menu)
-        # 设置关闭按钮图标（X符号）
-        self._setup_ai_tab_close_buttons()
+        # 右侧面板信号连接（初始 + 切换文件时重建都会调用 _connect_right_panel_signals）
+        self._connect_right_panel_signals()
 
         self._tab_main_widget = self.findChild(QtWidgets.QWidget, "tab_main")
         self._tab_log_widget = self.findChild(QtWidgets.QWidget, "tab_log")
         if self.tabs is not None:
             self.tabs.currentChanged.connect(self._on_main_tab_changed)
 
-        self.title_edit.textEdited.connect(self._mark_dirty)
-        # 初始化提供商选择
-        self.provider_combo.clear()
-        for provider_name in AI_PROVIDERS:
-            self.provider_combo.addItem(provider_name)
-        saved_provider = self._settings.value("ai/provider", DEFAULT_PROVIDER)
-        if saved_provider in AI_PROVIDERS:
-            self.provider_combo.setCurrentText(saved_provider)
-        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
-        # 初始化模型列表
-        self._update_model_list_for_provider(self.provider_combo.currentText())
-        self.model_combo.setCurrentText(self._selected_ai_model)
-        self.model_combo.currentTextChanged.connect(self._on_ai_model_changed)
-        self.btn_refresh_models.clicked.connect(self._refresh_ai_models)
-
-        # 使用 editor() 获取内部 LineNumberTextEdit 连接信号
-        self.content_edit.editor().textChanged.connect(self._mark_dirty)
-        self.content_edit.editor().textChanged.connect(self._update_realtime_token_stats)
-        # 高亮模式选择下拉框
-        self._highlight_mode_combo = QtWidgets.QComboBox()
-        self._highlight_mode_combo.addItems([
-            "普通文本",
-            "Python 代码",
-            "Markdown 源码",
-            "日志文件"
-        ])
-        self._highlight_mode_combo.setCurrentIndex(3)  # 默认日志模式
-        self._highlight_mode_combo.currentTextChanged.connect(self._on_highlight_mode_changed)
-        
-        # 将下拉框添加到工具栏区域（在标题下方）
-        toolbar_layout = QtWidgets.QHBoxLayout()
-        toolbar_layout.addWidget(QtWidgets.QLabel("高亮模式:"))
-        toolbar_layout.addWidget(self._highlight_mode_combo)
-        self.btn_open_external_file = QtWidgets.QPushButton("打开文件")
-        toolbar_layout.addWidget(self.btn_open_external_file)
-        toolbar_layout.addStretch()
-        
-        # 将工具栏布局插入到 content_edit 之前
-        parent_layout = self.content_edit.parent().layout()
-        if parent_layout:
-            parent_layout.insertLayout(0, toolbar_layout)
-        
-        self.btn_save.setObjectName("PrimaryButton")
-        self.btn_ai_ask.setObjectName("PrimaryButton")
-        self.btn_delete.setObjectName("DangerButton")
-
-        self.btn_new.clicked.connect(self._new_note)
-        self.btn_open_external_file.clicked.connect(self._open_external_file)
-        self.btn_save.clicked.connect(self._save_note)
-        self.btn_delete.clicked.connect(self._delete_note)
-        self.btn_refresh.clicked.connect(self.refresh_notes)
-        self.btn_favorite.clicked.connect(self._toggle_favorite_current)
-        self.btn_ai_ask.clicked.connect(self._ask_ai)
-        self.btn_restart.clicked.connect(self._restart_app)
-        self.btn_hotkey.clicked.connect(self._open_hotkey_settings)
-
         self.log_view.setObjectName("LogViewer")
         self._apply_text_font_size()
-        help_targets = (self.help_view,) if self.help_view is not None else ()
-        for editor_widget in (self.content_edit, self.ai_answer_edit, self.log_view, *help_targets):
-            # 使用 editor() 获取内部 LineNumberTextEdit
-            if hasattr(editor_widget, 'editor'):
+        # log_view / help_view 的事件过滤（右侧面板的 content_edit / ai_answer_edit
+        # 已在 _connect_right_panel_signals 中处理）
+        for editor_widget in (self.log_view, self.help_view):
+            if editor_widget is None:
+                continue
+            if hasattr(editor_widget, "editor"):
                 editor = editor_widget.editor()
                 editor.installEventFilter(self)
                 editor.viewport().installEventFilter(self)
@@ -552,6 +821,32 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         return Path(__file__).resolve().parent / "notepad_list" / title
 
     def _on_main_tab_changed(self, index: int) -> None:
+        # 拦截顶层「+ 打开文件」标签页：触发打开文件对话框后返回上一个标签
+        open_file_idx = getattr(self, "_open_file_tab_index", -1)
+        if index == open_file_idx:
+            prev_idx = getattr(self, "_prev_main_tab_index", 0)
+            try:
+                self.tabs.blockSignals(True)
+                if 0 <= prev_idx < self.tabs.count() and prev_idx != index:
+                    self.tabs.setCurrentIndex(prev_idx)
+                elif self.tabs.count() > 1:
+                    self.tabs.setCurrentIndex(0)
+                self.tabs.blockSignals(False)
+            except Exception:
+                try:
+                    self.tabs.blockSignals(False)
+                except Exception:
+                    pass
+            try:
+                self.btn_open_external_file.click()
+            except Exception:
+                self._open_external_file()
+            return
+
+        # 记录上一次有效标签索引（排除「+ 打开文件」）
+        if index != getattr(self, "_open_file_tab_index", -1):
+            self._prev_main_tab_index = index
+
         if index < 0 or self.log_view is None or self._tab_log_widget is None:
             return
         if self.tabs.widget(index) is not self._tab_log_widget:
@@ -628,30 +923,103 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             current_id = self._last_open_note_id
         query = self.search_edit.text().strip()
         notes_sorted = self._sort_notes(notes)
+        grouped_notes = self._group_notes_by_folder(notes_sorted, query=query)
+        if self._notes_tree_mode:
+            self._refresh_notes_tree(grouped_notes, query=query)
+        else:
+            self._refresh_notes_list(grouped_notes, query=query)
+
+        if self._ask_ai_mode:
+            self._set_ai_editor(self._current_ai_session_id)
+        elif current_id is not None:
+            selected = self._select_note_id(current_id)
+            if not selected:
+                self.append_log(f"刷新列表后未找到当前笔记: #{current_id}")
+        elif self._current_external_file:
+            selected = self._select_external_file(self._current_external_file)
+            if not selected:
+                self.append_log(f"刷新列表后未找到外部文件: {self._current_external_file}")
+        elif self._notes_count() > 1:
+            self._select_first_note_item()
+        else:
+            self._set_editor(None)
+        self._update_favorite_button_label()
+
+    def _apply_filter(self) -> None:
+        # lightweight local filter; refresh keeps the list consistent
+        self.refresh_notes()
+
+    def _setup_notes_tree(self) -> None:
+        tree = self.notes_tree
+        if tree is None:
+            return
+        tree.setHeaderHidden(True)
+        tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        tree.setAnimated(True)
+        tree.setExpandsOnDoubleClick(True)
+        tree.setUniformRowHeights(False)
+        tree.setIndentation(5)
+        # 只保留第 0 列（名称 + 日期），隐藏其它列
+        for col in range(1, tree.columnCount()):
+            tree.setColumnHidden(col, True)
+        # 自定义 delegate 实现两行不同颜色
+        if getattr(self, "_note_tree_delegate", None) is None:
+            self._note_tree_delegate = _NoteTreeItemDelegate(tree)
+        tree.setItemDelegate(self._note_tree_delegate)
+        # 自定义 ProxyStyle 绘制层级指示线
+        if getattr(self, "_note_tree_style", None) is None:
+            self._note_tree_style = _NoteTreeProxyStyle(tree.style())
+        tree.setStyle(self._note_tree_style)
+        tree.itemSelectionChanged.connect(self._on_selection_changed)
+        tree.itemDoubleClicked.connect(self._rename_note_from_item)
+        tree.itemExpanded.connect(self._on_folder_expanded_or_collapsed)
+        tree.itemCollapsed.connect(self._on_folder_expanded_or_collapsed)
+
+    def _notes_count(self) -> int:
+        if self._notes_tree_mode and self.notes_tree is not None:
+            count = 0
+            root = self.notes_tree.invisibleRootItem()
+            for i in range(root.childCount()):
+                child = root.child(i)
+                count += self._count_note_items_recursive(child)
+            return count
+        return self.notes_list.count() if self.notes_list is not None else 0
+
+    def _count_note_items_recursive(self, item: QtWidgets.QTreeWidgetItem) -> int:
+        item_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        count = 1 if isinstance(item_id, int) else 0
+        for i in range(item.childCount()):
+            count += self._count_note_items_recursive(item.child(i))
+        return count
+
+    def _refresh_notes_list(self, grouped_notes: list[tuple[str, list[NoteDto]]], *, query: str = "") -> None:
         self.notes_list.blockSignals(True)
-        # 保留固定的"问AI" item（从.ui文件加载），只清除动态添加的笔记items
         for i in range(self.notes_list.count() - 1, -1, -1):
             item = self.notes_list.item(i)
             if item.data(QtCore.Qt.ItemDataRole.UserRole) != ASK_AI_ITEM_ID:
                 self.notes_list.takeItem(i)
-        # AI sessions 不再显示在左侧列表中，而是在右侧标签页中显示
-        for n in notes_sorted:
-            # 跳过问AI相关的笔记，它们只在右侧标签页显示
-            if n.title.startswith("问AI"):
-                continue
-            if query and query.lower() not in n.title.lower():
-                continue
-            title = f"※ {n.title}" if self._is_favorite(n.id) else n.title
-            item = QtWidgets.QListWidgetItem(f"{title}\n{n.updated_at}")
-            font = item.font()
-            font.setBold(True)
-            item.setFont(font)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, n.id)
-            item.setToolTip(f"#{n.id}  {n.updated_at}")
-            item.setSizeHint(QtCore.QSize(0, 40))  # 增加高度以适应两行文本
-            # 禁用文本省略，确保完整显示
-            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
-            self.notes_list.addItem(item)
+        if grouped_notes:
+            for folder_name, folder_items in grouped_notes:
+                folder_label = folder_name or "未归档"
+                folder_header = QtWidgets.QListWidgetItem(f"📁 {folder_label}")
+                folder_header.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                folder_header.setData(QtCore.Qt.ItemDataRole.UserRole, f"__folder__:{folder_label}")
+                folder_font = folder_header.font()
+                folder_font.setBold(True)
+                folder_header.setFont(folder_font)
+                folder_header.setBackground(QtGui.QBrush(QtGui.QColor(245, 245, 245)))
+                folder_header.setForeground(QtGui.QBrush(QtGui.QColor(90, 90, 90)))
+                folder_header.setSizeHint(QtCore.QSize(0, 28))
+                self.notes_list.addItem(folder_header)
+                for n in folder_items:
+                    self.notes_list.addItem(self._create_note_list_item(n))
+        elif query:
+            empty_item = QtWidgets.QListWidgetItem(f"未找到匹配笔记：{query}")
+            empty_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            empty_item.setData(QtCore.Qt.ItemDataRole.UserRole, "__empty__")
+            empty_item.setForeground(QtGui.QBrush(QtGui.QColor(120, 120, 120)))
+            empty_item.setSizeHint(QtCore.QSize(0, 28))
+            self.notes_list.addItem(empty_item)
         for file_path in self._external_files:
             path = Path(file_path)
             if query and query.lower() not in path.name.lower():
@@ -667,37 +1035,256 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self.notes_list.addItem(item)
         self.notes_list.blockSignals(False)
 
-        def _select_row_and_refresh(row: int) -> None:
-            self.notes_list.setCurrentRow(row)
-            if not self._initializing:
-                self._on_selection_changed_inner()
+    def _refresh_notes_tree(self, grouped_notes: list[tuple[str, list[NoteDto]]], *, query: str = "") -> None:
+        tree = self.notes_tree
+        if tree is None:
+            return
 
-        # AI 会话不再在列表中显示，只选择问AI按钮（第0行）或笔记
-        if self._ask_ai_mode:
-            _select_row_and_refresh(0)  # 选择问AI按钮
-            self._set_ai_editor(self._current_ai_session_id)
-        elif current_id is not None:
-            selected = self._select_note_id(current_id)
-            if not selected:
-                self.append_log(f"刷新列表后未找到当前笔记: #{current_id}")
-        elif self._current_external_file:
-            selected = self._select_external_file(self._current_external_file)
-            if not selected:
-                self.append_log(f"刷新列表后未找到外部文件: {self._current_external_file}")
-        elif self.notes_list.count() > 1:
-            _select_row_and_refresh(1)  # 跳过问AI按钮，选择第一个笔记
-        else:
-            self._set_editor(None)
-        current_item = self.notes_list.currentItem() if self.notes_list else None
-        if current_item and current_item.data(QtCore.Qt.ItemDataRole.UserRole) == ASK_AI_ITEM_ID:
-            self._set_ai_editor(self._current_ai_session_id)
-        self._update_favorite_button_label()
+        # ① 清空前先收集所有文件夹的展开状态，合并到持久化字典中
+        if not hasattr(self, "_tree_folder_expanded_state"):
+            self._tree_folder_expanded_state = {}
 
-    def _apply_filter(self) -> None:
-        # lightweight local filter; refresh keeps the list consistent
-        self.refresh_notes()
+        def _collect_expand_walk(node: QtWidgets.QTreeWidgetItem) -> None:
+            role = node.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+            if isinstance(role, str) and (
+                role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+            ):
+                self._tree_folder_expanded_state[role] = node.isExpanded()
+            for i in range(node.childCount()):
+                _collect_expand_walk(node.child(i))
+
+        try:
+            root_collect = tree.invisibleRootItem()
+            for i in range(root_collect.childCount()):
+                _collect_expand_walk(root_collect.child(i))
+        except Exception:
+            pass
+
+        tree.blockSignals(True)
+        tree.clear()
+        ask_ai_item = QtWidgets.QTreeWidgetItem(["▾ 🤖 问AI"])
+        ask_ai_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, ASK_AI_ITEM_ID)
+        ask_ai_item.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, "问AI")
+        font = ask_ai_item.font(0)
+        font.setBold(True)
+        ask_ai_item.setFont(0, font)
+        ask_ai_item.setForeground(0, QtGui.QBrush(QtGui.QColor("#B794F4")))
+        ask_ai_item.setBackground(0, QtGui.QBrush(QtGui.QColor("rgba(183, 148, 244, 0.06)")))
+        tree.addTopLevelItem(ask_ai_item)
+        if grouped_notes:
+            for folder_name, folder_items in grouped_notes:
+                if folder_name == "":
+                    # 根目录文件（folder_name 为空）作为顶层独立项，
+                    # 不再错误塞入「问AI」分组
+                    for n in folder_items:
+                        tree.addTopLevelItem(self._create_note_tree_item(n))
+                else:
+                    parent = self._ensure_tree_folder_item(tree, folder_name)
+                    if parent is None:
+                        parent = tree.invisibleRootItem()
+                    for n in folder_items:
+                        parent.addChild(self._create_note_tree_item(n))
+        elif query:
+            empty_item = QtWidgets.QTreeWidgetItem([f"未找到匹配笔记：{query}"])
+            empty_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, "__empty__")
+            tree.addTopLevelItem(empty_item)
+        for file_path in self._external_files:
+            path = Path(file_path)
+            if query and query.lower() not in path.name.lower():
+                continue
+            item = QtWidgets.QTreeWidgetItem([f"↗ {path.name}", file_path])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"{EXTERNAL_FILE_PREFIX}{file_path}")
+            tree.addTopLevelItem(item)
+        # ② 按持久化的展开状态恢复（未记录的文件夹默认展开；ASK_AI 默认折叠由外部控制）
+        def _restore_expand_walk(node: QtWidgets.QTreeWidgetItem) -> None:
+            role = node.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+            if isinstance(role, str) and (
+                role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+            ):
+                expanded = self._tree_folder_expanded_state.get(role, True)
+                node.setExpanded(bool(expanded))
+                # 同步图标（▾/▸）和子项计数
+                self._update_folder_icon(node)
+            for i in range(node.childCount()):
+                _restore_expand_walk(node.child(i))
+
+        try:
+            root_restore = tree.invisibleRootItem()
+            for i in range(root_restore.childCount()):
+                _restore_expand_walk(root_restore.child(i))
+        except Exception:
+            tree.expandAll()
+
+        # 刷新所有文件夹项的图标和子项计数
+        self._refresh_all_folder_icons()
+        tree.blockSignals(False)
+
+    def _refresh_all_folder_icons(self) -> None:
+        """遍历树中所有文件夹/ASK_AI 项，更新展开图标和子项计数。"""
+        tree = self.notes_tree
+        if tree is None:
+            return
+
+        def walk(item: QtWidgets.QTreeWidgetItem) -> None:
+            role = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+            if isinstance(role, str) and (
+                role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+            ):
+                self._update_folder_icon(item)
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        root = tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            walk(root.child(i))
+
+    def _on_folder_expanded_or_collapsed(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        """itemExpanded/itemCollapsed 信号的处理：实时切换 ▾/▸，并持久化展开状态。"""
+        self._update_folder_icon(item)
+        # 持久化当前文件夹的展开状态，供刷新/重建后恢复
+        role = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+        if isinstance(role, str) and (
+            role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+        ):
+            if not hasattr(self, "_tree_folder_expanded_state"):
+                self._tree_folder_expanded_state = {}
+            self._tree_folder_expanded_state[role] = item.isExpanded()
+
+    def _ensure_tree_folder_item(self, tree: QtWidgets.QTreeWidget, folder_path: str) -> QtWidgets.QTreeWidgetItem:
+        parts = [p for p in folder_path.replace("\\", "/").split("/") if p]
+        parent = tree.invisibleRootItem()
+        current_path = []
+        for part in parts:
+            current_path.append(part)
+            current_path_str = "/".join(current_path)
+            found = None
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                if child.data(0, QtCore.Qt.ItemDataRole.UserRole) == f"__folder__:{current_path_str}":
+                    found = child
+                    break
+            if found is None:
+                # 初始显示展开状态（▾），折叠后通过 _update_folder_icon 切换为 ▸
+                found = QtWidgets.QTreeWidgetItem([f"▾ 📁 {part}"])
+                found.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"__folder__:{current_path_str}")
+                found.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, part)  # 保留纯名称用于更新计数/图标
+                folder_font = found.font(0)
+                folder_font.setBold(True)
+                found.setFont(0, folder_font)
+                found.setForeground(0, QtGui.QBrush(QtGui.QColor("#89DDFF")))
+                # 文件夹项的背景微亮，区别于子项
+                found.setBackground(0, QtGui.QBrush(QtGui.QColor("rgba(137, 221, 255, 0.06)")))
+                parent.addChild(found)
+                # 默认展开
+                found.setExpanded(True)
+            parent = found
+        return parent
+
+    def _update_folder_icon(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        """根据文件夹展开状态更新图标（▾/▸）并刷新子项计数。"""
+        if item is None:
+            return
+        role = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+        if not (isinstance(role, str) and role.startswith("__folder__:")):
+            return
+        base_name = item.data(0, QtCore.Qt.ItemDataRole.UserRole + 1) or ""
+        if not base_name:
+            # 回退：从当前文本中提取名称
+            cur = (item.text(0) or "").strip()
+            # 去除 ▾/▸ 与 📁 前缀
+            for prefix in ("▾", "▸"):
+                if cur.startswith(prefix):
+                    cur = cur[len(prefix):].strip()
+            if cur.startswith("📁"):
+                cur = cur[2:].strip()
+            # 去掉尾部的 " (N)" 计数
+            if " (" in cur and cur.endswith(")"):
+                cur = cur.rsplit(" (", 1)[0]
+            base_name = cur
+        # 统计直接子项（仅笔记项，排除子文件夹）
+        note_count = 0
+        for i in range(item.childCount()):
+            child = item.child(i)
+            cid = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(cid, int):
+                note_count += 1
+        icon = "▾" if item.isExpanded() else "▸"
+        count_text = f" ({note_count})" if note_count > 0 else ""
+        item.setText(0, f"{icon} 📁 {base_name}{count_text}")
+
+    _MAX_FILENAME_CHARS = 30
+
+    @staticmethod
+    def _truncate_filename(name: str, limit: int = 30) -> str:
+        """文件名超过 limit 个字符时，截断并加 '…'。"""
+        if not name or len(name) <= limit:
+            return name
+        return name[:limit] + "…"
+
+    def _create_note_list_item(self, note: NoteDto) -> QtWidgets.QListWidgetItem:
+        display_title = self._truncate_filename(Path(note.title).name)
+        title = f"※ {display_title}" if self._is_favorite(note.id) else display_title
+        item = QtWidgets.QListWidgetItem(f"  {title}\n  {note.updated_at}")
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, note.id)
+        item.setToolTip(f"{Path(note.title).name}  #{note.id}  {note.updated_at}")
+        item.setSizeHint(QtCore.QSize(0, 40))
+        item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        return item
+
+    def _create_note_tree_item(self, note: NoteDto) -> QtWidgets.QTreeWidgetItem:
+        display_title = self._truncate_filename(Path(note.title).name)
+        title = f"※ {display_title}" if self._is_favorite(note.id) else display_title
+        # 日期简短格式：将 ISO 8601 中的 'T' 替换为空格，并只保留分钟
+        updated_at = (note.updated_at or "").replace("T", " ").split(":", 2)
+        short_date = ":".join(updated_at[:2]) if len(updated_at) >= 2 else (note.updated_at or "")
+        # 文件名 + 日期换行显示
+        item = QtWidgets.QTreeWidgetItem([f"{title}\n{short_date}"])
+        font = item.font(0)
+        font.setBold(True)
+        item.setFont(0, font)
+        # 文件名字体色，日期用浅灰（通过 foreground 统一色，让换行后的第二行更淡）
+        item.setForeground(0, QtGui.QBrush(QtGui.QColor("#E9EEF5")))
+        item.setData(0, QtCore.Qt.ItemDataRole.UserRole, note.id)
+        item.setToolTip(0, f"{Path(note.title).name}  #{note.id}  {note.updated_at}")
+        return item
+
+    def _group_notes_by_folder(
+        self,
+        notes: list[NoteDto],
+        *,
+        query: str = "",
+    ) -> list[tuple[str, list[NoteDto]]]:
+        grouped: dict[str, list[NoteDto]] = {}
+        for note in notes:
+            if note.title.startswith("问AI"):
+                continue
+            if query and query.lower() not in note.title.lower():
+                continue
+            folder_name = self._note_folder_name(note.title)
+            grouped.setdefault(folder_name, []).append(note)
+        return sorted(
+            grouped.items(),
+            key=lambda kv: (kv[0] == "", kv[0].lower()),
+        )
+
+    @staticmethod
+    def _note_folder_name(title: str) -> str:
+        path = Path(title)
+        parent = path.parent
+        if str(parent) in {".", ""}:
+            return ""
+        return str(parent).replace("\\", "/")
 
     def _select_note_id(self, note_id: int) -> bool:
+        if self._notes_tree_mode and self.notes_tree is not None:
+            item = self._find_tree_item_by_note_id(note_id)
+            if item is not None:
+                self.notes_tree.setCurrentItem(item)
+                return True
+            return False
         for i in range(self.notes_list.count()):
             item = self.notes_list.item(i)
             item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -707,6 +1294,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 continue
             if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
                 continue
+            if isinstance(item_id, str) and (item_id.startswith("__folder__:") or item_id.startswith("__empty__")):
+                continue
             if int(item_id) == int(note_id):
                 self.notes_list.setCurrentRow(i)
                 return True
@@ -714,6 +1303,12 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     def _select_external_file(self, file_path: str) -> bool:
         target = f"{EXTERNAL_FILE_PREFIX}{file_path}"
+        if self._notes_tree_mode and self.notes_tree is not None:
+            item = self._find_tree_item_by_user_role(target)
+            if item is not None:
+                self.notes_tree.setCurrentItem(item)
+                return True
+            return False
         for i in range(self.notes_list.count()):
             item = self.notes_list.item(i)
             if item.data(QtCore.Qt.ItemDataRole.UserRole) == target:
@@ -729,6 +1324,22 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 self.notes_list.setCurrentRow(i)
                 return
 
+    def _find_tree_item_by_user_role(self, target) -> QtWidgets.QTreeWidgetItem | None:
+        if self.notes_tree is None:
+            return None
+        root = self.notes_tree.invisibleRootItem()
+        stack = [root.child(i) for i in range(root.childCount())]
+        while stack:
+            item = stack.pop(0)
+            if item.data(0, QtCore.Qt.ItemDataRole.UserRole) == target:
+                return item
+            for i in range(item.childCount()):
+                stack.append(item.child(i))
+        return None
+
+    def _find_tree_item_by_note_id(self, note_id: int) -> QtWidgets.QTreeWidgetItem | None:
+        return self._find_tree_item_by_user_role(note_id)
+
     def _on_selection_changed(self) -> None:
         if self._in_selection_changed:
             return
@@ -740,10 +1351,100 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             raise
         finally:
             self._in_selection_changed = False
+            # 选中子文件时，高亮其父级目录链
+            self._highlight_parent_folders()
+
+    # 文件夹默认底色缓存（role -> QColor）
+    _FOLDER_DEFAULT_BG: dict = {
+        "__ask_ai__": QtGui.QColor(183, 148, 244, 15),
+    }
+    _FOLDER_DEFAULT_BG_DEFAULT = QtGui.QColor(137, 221, 255, 15)
+    # 父级高亮色（透明度 0.8）
+    _FOLDER_HIGHLIGHT_BG = QtGui.QColor(77, 130, 220, 50)
+
+    def _highlight_parent_folders(self) -> None:
+        """清除所有文件夹的高亮，并为选中项的所有祖先文件夹加高亮底色。
+
+        通过 UserRole+99 标记 item，由 _NoteTreeItemDelegate 在 paint 中叠加绘制，
+        避免 QSS 中 ::item{background:transparent} 覆盖 setBackground。
+        """
+        tree = self.notes_tree
+        if tree is None or not self._notes_tree_mode:
+            return
+
+        highlight_role = _NoteTreeItemDelegate._PARENT_HIGHLIGHT_ROLE
+
+        # 1. 重置所有文件夹的高亮标记和底色
+        root = tree.invisibleRootItem()
+
+        def reset_walk(node: QtWidgets.QTreeWidgetItem) -> None:
+            role = node.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+            if isinstance(role, str) and (
+                role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+            ):
+                node.setData(0, highlight_role, False)
+                default = (
+                    self._FOLDER_DEFAULT_BG.get(role)
+                    or self._FOLDER_DEFAULT_BG_DEFAULT
+                )
+                node.setBackground(0, QtGui.QBrush(default))
+            for i in range(node.childCount()):
+                reset_walk(node.child(i))
+
+        for i in range(root.childCount()):
+            reset_walk(root.child(i))
+
+        # 2. 找出所有选中项的祖先文件夹，并标记高亮
+        selected = tree.selectedItems()
+        if not selected:
+            tree.viewport().update()
+            return
+
+        highlight_brush = QtGui.QBrush(self._FOLDER_HIGHLIGHT_BG)
+        highlighted: set[int] = set()
+
+        for item in selected:
+            # 若当前项本身就是文件夹，也需高亮
+            role = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+            if isinstance(role, str) and (
+                role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+            ):
+                if id(item) not in highlighted:
+                    item.setData(0, highlight_role, True)
+                    item.setBackground(0, highlight_brush)
+                    highlighted.add(id(item))
+            # 向上遍历父链
+            cur = item.parent()
+            while cur is not None:
+                role = cur.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+                if isinstance(role, str) and (
+                    role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+                ):
+                    if id(cur) not in highlighted:
+                        cur.setData(0, highlight_role, True)
+                        cur.setBackground(0, highlight_brush)
+                        highlighted.add(id(cur))
+                cur = cur.parent()
+
+        tree.viewport().update()
+
+    def _selected_note_items(self) -> list[object]:
+        if self._notes_tree_mode and self.notes_tree is not None:
+            return self.notes_tree.selectedItems()
+        return self.notes_list.selectedItems()
+
+    def _selected_item_id(self):
+        items = self._selected_note_items()
+        if not items:
+            return None
+        item = items[0]
+        if self._notes_tree_mode and isinstance(item, QtWidgets.QTreeWidgetItem):
+            return item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        return item.data(QtCore.Qt.ItemDataRole.UserRole)
 
     def _on_selection_changed_inner(self) -> None:
-        items = self.notes_list.selectedItems()
-        item_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole) if items else None
+        items = self._selected_note_items()
+        item_id = self._selected_item_id()
         self.append_debug_log(f"选择切换: item_id={item_id!r}, selected={len(items)}")
         if item_id == ASK_AI_ITEM_ID:
             if not self._initializing and self.state.current_note_id is not None:
@@ -764,7 +1465,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             return
 
         self._ask_ai_mode = False
-        item_id = items[0].data(QtCore.Qt.ItemDataRole.UserRole)
+        item_id = self._selected_item_id()
         if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
             self.append_log(f"切换到外部文件: {item_id[len(EXTERNAL_FILE_PREFIX):]}")
             self._set_external_file_editor(item_id[len(EXTERNAL_FILE_PREFIX):])
@@ -1083,8 +1784,12 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             return
         self._right_widget_refs[key] = widget
 
-    def _get_right_widget(self, key: str, fallback_attr: str | None = None):
+    def _get_right_widget(self, key: str, fallback_attr: str | None = None, expected_type=None):
         widget = self._right_widget_refs.get(key)
+        if widget is None and fallback_attr is not None:
+            widget = getattr(self, fallback_attr, None)
+        if expected_type is not None and not isinstance(widget, expected_type):
+            widget = getattr(self, key, None)
         if self._qt_is_valid(widget):
             return widget
         if fallback_attr:
@@ -1095,30 +1800,143 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         return None
 
     def _refresh_core_widget_refs(self) -> None:
-        """重新获取可能被 Qt 删除/替换过的核心控件引用。"""
-        if not self._qt_is_valid(getattr(self, "tabs", None)):
-            self.tabs = self.findChild(QtWidgets.QTabWidget, "tabs")
-        if not self._qt_is_valid(getattr(self, "ai_tabs", None)):
-            self.ai_tabs = self.findChild(QtWidgets.QTabWidget, "ai_tabs")
-            self.append_log(f"重新获取 ai_tabs 引用: valid={self._qt_is_valid(self.ai_tabs)}")
-        if not self._qt_is_valid(getattr(self, "content_edit", None)):
-            widget = self.findChild(CodeEditorWidget, "CodeEditor")
-            if widget is not None:
-                self.content_edit = widget
-                self._remember_right_widget("content_edit", widget)
-                self.append_log("重新获取 content_edit 引用")
-        if not self._qt_is_valid(getattr(self, "ai_answer_edit", None)):
-            widget = self.findChild(CodeEditorWidget, "AiAnswerViewer")
-            if widget is not None:
-                self.ai_answer_edit = widget
-                self._remember_right_widget("ai_answer_edit", widget)
-                self.append_log("重新获取 ai_answer_edit 引用")
-        if not self._qt_is_valid(getattr(self, "title_edit", None)):
-            widget = self.findChild(QtWidgets.QLineEdit, "title_edit")
-            if widget is not None:
-                self.title_edit = widget
-                self._remember_right_widget("title_edit", widget)
-                self.append_log("重新获取 title_edit 引用")
+        """右侧面板失效时，通过重建 RightPanel 实例刷新全部右侧控件引用。
+
+        只有当关键右侧控件失效时才重建，避免每次调用都丢失编辑状态。
+        """
+        critical = ("title_edit", "content_edit", "ai_tabs", "btn_save", "ai_answer_edit")
+        need_rebuild = False
+        for key in critical:
+            widget = self._right_widget_refs.get(key) or getattr(self, key, None)
+            if not self._qt_is_valid(widget):
+                need_rebuild = True
+                break
+        if not need_rebuild:
+            return
+        self._rebuild_right_panel()
+
+    def _rebuild_right_panel(self) -> None:
+        """销毁旧的右侧面板并新建 RightPanel 实例。"""
+        splitter = self.findChild(QtWidgets.QSplitter, "splitter_main")
+        if splitter is None:
+            self.append_log("警告: 重建右侧面板时找不到 splitter_main，跳过")
+            return
+
+        # 移除当前右侧面板（含旧 RightPanel 及其全部子控件）
+        for _i in range(splitter.count()):
+            _w = splitter.widget(_i)
+            if _w is not None and _w.objectName() == "right_panel":
+                _w.setParent(None)
+                _w.deleteLater()
+                break
+
+        self._right_panel = RightPanel(self)
+        splitter.addWidget(self._right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        self._right_panel.bind_to(self)
+        self._connect_right_panel_signals()
+
+    def _connect_right_panel_signals(self) -> None:
+        """把重建后的右侧面板控件与 MainWindow 信号连接起来。"""
+        # AI 标签页
+        self.ai_tabs.tabCloseRequested.connect(self._on_ai_tab_close_requested)
+        self.ai_tabs.currentChanged.connect(self._on_ai_tab_changed)
+        self.ai_tabs.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ai_tabs.customContextMenuRequested.connect(self._on_ai_tabs_context_menu)
+        self._setup_ai_tab_close_buttons()
+
+        # 标题编辑
+        self.title_edit.textEdited.connect(self._mark_dirty)
+
+        # 提供商选择
+        self.provider_combo.clear()
+        for provider_name in AI_PROVIDERS:
+            self.provider_combo.addItem(provider_name)
+        saved_provider = self._settings.value("ai/provider", DEFAULT_PROVIDER)
+        if saved_provider in AI_PROVIDERS:
+            self.provider_combo.setCurrentText(saved_provider)
+        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
+
+        # 模型列表
+        self._update_model_list_for_provider(self.provider_combo.currentText())
+        self.model_combo.setCurrentText(self._selected_ai_model)
+        self.model_combo.currentTextChanged.connect(self._on_ai_model_changed)
+        self.btn_refresh_models.clicked.connect(self._refresh_ai_models)
+
+        # 笔记区编辑器
+        self.content_edit.editor().textChanged.connect(self._mark_dirty)
+        self.content_edit.editor().textChanged.connect(self._update_realtime_token_stats)
+
+        # 「打开文件」作为顶层标签栏（主界面/帮助/日志）末尾的按钮式标签
+        if not self._qt_is_valid(getattr(self, "btn_open_external_file", None)):
+            self.btn_open_external_file = QtWidgets.QPushButton("+ 打开文件")
+            self.btn_open_external_file.setObjectName("OpenFileTabButton")
+            self.btn_open_external_file.setStyleSheet(
+                """QPushButton#OpenFileTabButton {
+                    padding: 3px 12px;
+                    font-size: 12px;
+                    border: 1px solid rgba(137, 221, 255, 0.25);
+                    border-radius: 8px;
+                    background: rgba(255,255,255,0.04);
+                    color: #89DDFF;
+                    margin: 0 4px;
+                }
+                QPushButton#OpenFileTabButton:hover {
+                    background: rgba(77, 163, 255, 0.18);
+                    border-color: rgba(77, 163, 255, 0.55);
+                }
+                QPushButton#OpenFileTabButton:pressed {
+                    background: rgba(77, 163, 255, 0.28);
+                }"""
+            )
+            self.btn_open_external_file.clicked.connect(self._open_external_file)
+        # 把“+ 打开文件”作为顶层 tabs 末尾的占位标签（与主界面/帮助/日志同一行）
+        try:
+            # 移除之前可能残留的占位标签
+            for i in range(self.tabs.count() - 1, -1, -1):
+                w = self.tabs.widget(i)
+                if w is not None and w.objectName() == "_open_file_holder":
+                    self.tabs.removeTab(i)
+                    w.deleteLater()
+                    break
+            # 新增占位标签
+            holder = QtWidgets.QWidget()
+            holder.setObjectName("_open_file_holder")
+            idx = self.tabs.addTab(holder, "+ 打开文件")
+            self._open_file_tab_index = idx
+            # 顶层 tabs 默认不可关闭，占位标签自然不显示关闭按钮
+        except Exception:
+            self._open_file_tab_index = -1
+
+        self.btn_save.setObjectName("PrimaryButton")
+        self.btn_ai_ask.setObjectName("PrimaryButton")
+        self.btn_delete.setObjectName("DangerButton")
+
+        # 按钮
+        self.btn_new.clicked.connect(self._new_note)
+        self.btn_save.clicked.connect(self._save_note)
+        self.btn_delete.clicked.connect(self._delete_note)
+        self.btn_refresh.clicked.connect(self.refresh_notes)
+        self.btn_favorite.clicked.connect(self._toggle_favorite_current)
+        self.btn_ai_ask.clicked.connect(self._ask_ai)
+        self.btn_restart.clicked.connect(self._restart_app)
+        self.btn_hotkey.clicked.connect(self._open_hotkey_settings)
+
+        # 编辑器事件过滤
+        for editor_widget in (self.content_edit, self.ai_answer_edit):
+            if hasattr(editor_widget, "editor"):
+                editor = editor_widget.editor()
+                editor.installEventFilter(self)
+                editor.viewport().installEventFilter(self)
+
+        # 初始隐藏 AI 相关控件
+        for w in (self.provider_combo, self.label_model, self.model_combo,
+                  self.btn_refresh_models, self.label_input_tokens,
+                  self.label_output_tokens, self.label_cost, self.label_price_source):
+            if w is not None:
+                w.hide()
+
 
     def _ensure_main_tab_active(self, reason: str) -> None:
         """切换左侧笔记/AI 时确保主界面页是当前页，否则右侧父级不可见。"""
@@ -1320,6 +2138,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.append_log(f"置顶/收藏完成: button_text={self.btn_favorite.text()!r}")
 
     def _on_notes_rows_moved(self, *_args) -> None:
+        if self._notes_tree_mode:
+            return
         first = self.notes_list.item(0) if self.notes_list.count() else None
         if first is not None and first.data(QtCore.Qt.ItemDataRole.UserRole) != ASK_AI_ITEM_ID:
             self.refresh_notes()
@@ -1340,10 +2160,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._favorite_order = reordered_favs
             self._save_settings()
 
-    def _rename_note_from_item(self, item: QtWidgets.QListWidgetItem) -> None:
-        if item.data(QtCore.Qt.ItemDataRole.UserRole) == ASK_AI_ITEM_ID:
+    def _rename_note_from_item(self, item) -> None:
+        item_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole) if isinstance(item, QtWidgets.QTreeWidgetItem) else item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if item_id == ASK_AI_ITEM_ID or (isinstance(item_id, str) and (item_id.startswith("__folder__:") or item_id.startswith("__empty__"))):
             return
-        note_id = int(item.data(QtCore.Qt.ItemDataRole.UserRole))
+        note_id = int(item_id)
         try:
             note = self.api.get_note(note_id)
         except ApiError as e:
@@ -1619,16 +2440,22 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         return re.sub(r"[^a-z0-9]+", "", model.lower())
 
     def _update_token_labels(self) -> None:
-        self.label_input_tokens.setText(f"输入: {self._ai_input_tokens} tokens")
-        self.label_output_tokens.setText(f"输出: {self._ai_output_tokens} tokens")
+        label_input = self._get_right_widget("label_input_tokens", expected_type=QtWidgets.QLabel)
+        label_output = self._get_right_widget("label_output_tokens", expected_type=QtWidgets.QLabel)
+        label_cost = self._get_right_widget("label_cost", expected_type=QtWidgets.QLabel)
+        if not (self._qt_is_valid(label_input) and self._qt_is_valid(label_output) and self._qt_is_valid(label_cost)):
+            self.append_log("token label 已失效，跳过更新")
+            return
+        label_input.setText(f"输入: {self._ai_input_tokens} tokens")
+        label_output.setText(f"输出: {self._ai_output_tokens} tokens")
         price = self._current_model_price()
         if price is None:
-            self.label_cost.setText("费用: 价格未知")
+            label_cost.setText("费用: 价格未知")
             return
         input_cost = self._ai_input_tokens / 1_000_000 * price.input_per_m
         output_cost = self._ai_output_tokens / 1_000_000 * price.output_per_m
         total = input_cost + output_cost
-        self.label_cost.setText(
+        label_cost.setText(
             f"费用: {price.currency}{total:.6f} "
             f"(入 {price.currency}{input_cost:.6f} / 出 {price.currency}{output_cost:.6f})"
         )
@@ -2346,9 +3173,24 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _update_title(self) -> None:
         suffix = " *" if self.state.dirty else ""
         if self._current_external_file:
-            cur = f"外部文件: {Path(self._current_external_file).name}"
+            # 外部文件：显示完整路径层级
+            p = Path(self._current_external_file)
+            try:
+                # 尽量显示相对 notepad_list 的相对路径
+                rel = p.relative_to(self._notepad_list_dir()).as_posix()
+            except Exception:
+                rel = p.as_posix()
+            cur = rel.replace("/", " › ")
+        elif self.state.current_note_id:
+            try:
+                note = self.api.get_note(self.state.current_note_id)
+                # note.title 为相对 notepad_list 的路径，例如 "日志A/maya_xxx.py"
+                raw_title = note.title or f"#{note.id}"
+                cur = raw_title.replace("/", " › ").replace("\\", " › ")
+            except Exception:
+                cur = f"#{self.state.current_note_id}"
         else:
-            cur = f"#{self.state.current_note_id}" if self.state.current_note_id else "新建"
+            cur = "新建"
         self.setWindowTitle(f"L Notepad - {cur}{suffix}")
 
     @QtCore.Slot()
@@ -2428,6 +3270,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             import traceback
             self.append_log(traceback.format_exc())
 
+    @QtCore.Slot(str, str)
+    @QtCore.Slot(str)
     def append_log(self, message: str, level: str = "INFO") -> None:
         level = (level or "INFO").upper()
         if level == "DEBUG" and self._log_level != "DEBUG":
@@ -2540,6 +3384,17 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._text_font_size = max(8, min(28, int(str(font_size_raw))))
         except Exception:
             self._text_font_size = 10
+        # 读取目录展开状态持久化字典
+        expand_raw = self._settings.value("ui/folder_expanded", "{}")
+        try:
+            parsed = json.loads(str(expand_raw)) if expand_raw is not None else {}
+            if isinstance(parsed, dict):
+                # 确保值均为 bool
+                self._tree_folder_expanded_state = {str(k): bool(v) for k, v in parsed.items()}
+            else:
+                self._tree_folder_expanded_state = {}
+        except Exception:
+            self._tree_folder_expanded_state = {}
 
     def _restore_ai_tabs(self) -> None:
         """从 notepad_list 目录中的问AI文件恢复 AI 标签页"""
@@ -2620,6 +3475,14 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._settings.setValue("ai/sessions", json.dumps(ai_sessions_data, ensure_ascii=False))
             self._settings.setValue("ai/current_session_id", self._current_ai_session_id or "")
             self._settings.setValue("ui/text_font_size", str(self._text_font_size))
+            # 保存目录展开状态
+            try:
+                self._settings.setValue(
+                    "ui/folder_expanded",
+                    json.dumps(getattr(self, "_tree_folder_expanded_state", {}) or {}),
+                )
+            except Exception:
+                pass
             self._settings.setValue("window/geometry", self.saveGeometry())
             self._settings.sync()
         except Exception:
@@ -2661,6 +3524,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             widget = self.ai_tabs.widget(i)
             if widget and widget.property("session_id") == oldest_sid:
                 self.ai_tabs.removeTab(i)
+                self._right_widget_refs.pop("ai_answer_edit", None)
                 break
         # 删除会话
         del self._ai_sessions[oldest_sid]
@@ -2885,6 +3749,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         """切换 AI 标签页"""
         if index < 0 or not self._qt_is_valid(getattr(self, "ai_tabs", None)):
             return
+
         widget = self.ai_tabs.widget(index)
         if widget is None:
             return

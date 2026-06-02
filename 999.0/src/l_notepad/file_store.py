@@ -119,7 +119,7 @@ def list_notes_meta(root_dir: Path, limit: int = 500) -> list[FileNoteMeta]:
         out.append(
             FileNoteMeta(
                 path=rel,
-                title=p.name,
+                title=rel,
                 created_at=_iso_from_ts(st.st_ctime),
                 updated_at=_iso_from_ts(st.st_mtime),
             )
@@ -145,7 +145,7 @@ def list_notes(root_dir: Path, limit: int = 500) -> list[FileNote]:
         out.append(
             FileNote(
                 path=rel,
-                title=p.name,
+                title=rel,
                 content=content,
                 created_at=_iso_from_ts(st.st_ctime),
                 updated_at=_iso_from_ts(st.st_mtime),
@@ -230,7 +230,9 @@ def update_note(
     if new_content is not None:
         p.write_text(new_content, encoding="utf-8")
     if new_title is not None:
-        new_name = sanitize_title_to_filename(new_title)
+        # 只使用文件名重命名，避免用户输入包含 '/' 的路径破坏文件名
+        new_name_raw = new_title.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        new_name = sanitize_title_to_filename(new_name_raw)
         if new_name and new_name != p.name:
             new_p = _unique_path(root_dir, p.with_name(new_name))
             p.rename(new_p)

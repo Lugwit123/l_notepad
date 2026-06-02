@@ -61,21 +61,33 @@
            <enum>Qt::Horizontal</enum>
           </property>
           <widget class="QWidget" name="left_panel">
+           <property name="minimumSize">
+            <size>
+             <width>170</width>
+             <height>0</height>
+            </size>
+           </property>
+           <property name="maximumSize">
+            <size>
+             <width>220</width>
+             <height>16777215</height>
+            </size>
+           </property>
            <layout class="QVBoxLayout" name="verticalLayout_left">
             <property name="spacing">
-             <number>10</number>
+             <number>6</number>
             </property>
             <property name="leftMargin">
-             <number>10</number>
+             <number>6</number>
             </property>
             <property name="topMargin">
-             <number>10</number>
+             <number>8</number>
             </property>
             <property name="rightMargin">
-             <number>10</number>
+             <number>4</number>
             </property>
             <property name="bottomMargin">
-             <number>10</number>
+             <number>8</number>
             </property>
             <item>
              <widget class="QLineEdit" name="search_edit">
@@ -85,37 +97,36 @@
              </widget>
             </item>
             <item>
-             <widget class="QListWidget" name="notes_list">
+             <widget class="QTreeWidget" name="notes_list">
               <property name="minimumSize">
                <size>
-                <width>260</width>
+                <width>150</width>
                 <height>0</height>
                </size>
               </property>
-              <property name="acceptDrops">
+              <property name="headerHidden">
                <bool>true</bool>
               </property>
-              <property name="dragEnabled">
+              <property name="animated">
                <bool>true</bool>
               </property>
-              <property name="dragDropMode">
-               <enum>QAbstractItemView::InternalMove</enum>
+              <property name="expandsOnDoubleClick">
+               <bool>true</bool>
               </property>
-              <property name="defaultDropAction">
-               <enum>Qt::MoveAction</enum>
+              <property name="uniformRowHeights">
+               <bool>false</bool>
               </property>
-              <property name="spacing">
-               <number>1</number>
+              <property name="indentation">
+               <number>16</number>
               </property>
-              <item>
+              <property name="wordWrap">
+               <bool>true</bool>
+              </property>
+              <column>
                <property name="text">
-                <string>问AI
-新建对话</string>
+                <string>名称</string>
                </property>
-               <property name="toolTip">
-                <string>创建一个新的 AI 对话会话</string>
-               </property>
-              </item>
+              </column>
              </widget>
             </item>
             <item>
