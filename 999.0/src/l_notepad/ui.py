@@ -32,6 +32,8 @@ from .settings_widget import SettingsWidget
 # 从 l_qt_wgt_lib 导入代码编辑器组件
 from l_qt_wgt_lib.smart_widget import (
     CodeEditorWidget,
+    apply_indent_display_options,
+    load_indent_display_options_from_settings,
 )
 from l_qt_wgt_lib.tray_window import TrayAwareMixin
 
@@ -753,10 +755,16 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._tab_main_widget = self.findChild(QtWidgets.QWidget, "tab_main")
         self._tab_log_widget = self.findChild(QtWidgets.QWidget, "tab_log")
         self._folder_favorites_panel = FolderFavoritesPanel(self, restart_callback=self._restart_app)
+        self._folder_favorites_tab_index = -1
         self._settings_widget = SettingsWidget(self)
+        if hasattr(self._settings_widget, "font_size_spin"):
+            self._settings_widget.font_size_spin.blockSignals(True)
+            self._settings_widget.font_size_spin.setValue(self._text_font_size)
+            self._settings_widget.font_size_spin.blockSignals(False)
         if self.tabs is not None:
             # 插入文件夹收藏标签页（索引 1）
             self.tabs.insertTab(1, self._folder_favorites_panel, " 文件夹收藏")
+            self._folder_favorites_tab_index = self.tabs.indexOf(self._folder_favorites_panel)
             # 插入设置标签页（在日志之前）
             log_index = self.tabs.indexOf(self._tab_log_widget)
             if log_index >= 0:
@@ -764,6 +772,14 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             else:
                 # 如果找不到日志标签页，插入到最后
                 self.tabs.addTab(self._settings_widget, "设置")
+            self._ensure_open_file_tab()
+            self._settings_widget.indent_display_changed.connect(
+                self._apply_indent_display_settings
+            )
+            self._settings_widget.folder_hotkey_changed.connect(
+                self._on_folder_hotkey_button_changed
+            )
+            self._settings_widget.font_size_changed.connect(self._set_text_font_size)
             self.tabs.currentChanged.connect(self._on_main_tab_changed)
 
         self.log_view.setObjectName("LogViewer")
@@ -827,14 +843,20 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _note_file_path(self, title: str) -> Path:
         return Path(__file__).resolve().parent / "notepad_list" / title
 
+    def _is_open_file_tab(self, index: int) -> bool:
+        """判断顶层标签索引是否为「+ 打开文件」占位页。"""
+        if self.tabs is None or index < 0 or index >= self.tabs.count():
+            return False
+        widget = self.tabs.widget(index)
+        return widget is not None and widget.objectName() == "_open_file_holder"
+
     def _on_main_tab_changed(self, index: int) -> None:
         # 拦截顶层「+ 打开文件」标签页：触发打开文件对话框后返回上一个标签
-        open_file_idx = getattr(self, "_open_file_tab_index", -1)
-        if index == open_file_idx:
+        if self._is_open_file_tab(index):
             prev_idx = getattr(self, "_prev_main_tab_index", 0)
             try:
                 self.tabs.blockSignals(True)
-                if 0 <= prev_idx < self.tabs.count() and prev_idx != index:
+                if 0 <= prev_idx < self.tabs.count() and not self._is_open_file_tab(prev_idx):
                     self.tabs.setCurrentIndex(prev_idx)
                 elif self.tabs.count() > 1:
                     self.tabs.setCurrentIndex(0)
@@ -851,7 +873,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             return
 
         # 记录上一次有效标签索引（排除「+ 打开文件」）
-        if index != getattr(self, "_open_file_tab_index", -1):
+        if not self._is_open_file_tab(index):
             self._prev_main_tab_index = index
 
         if index < 0 or self.log_view is None or self._tab_log_widget is None:
@@ -1759,6 +1781,18 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             encoding="utf-8",
         )
 
+    def _ensure_open_file_tab(self) -> None:
+        """在顶层 tabs 末尾添加「+ 打开文件」占位标签（需在其它动态标签插入之后调用）。"""
+        if self.tabs is None:
+            return
+        for i in range(self.tabs.count() - 1, -1, -1):
+            widget = self.tabs.widget(i)
+            if widget is not None and widget.objectName() == "_open_file_holder":
+                return
+        holder = QtWidgets.QWidget()
+        holder.setObjectName("_open_file_holder")
+        self.tabs.addTab(holder, "+ 打开文件")
+
     def _open_external_file(self) -> None:
         if self.state.dirty and not self._confirm_discard():
             return
@@ -1898,23 +1932,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 }"""
             )
             self.btn_open_external_file.clicked.connect(self._open_external_file)
-        # 把“+ 打开文件”作为顶层 tabs 末尾的占位标签（与主界面/帮助/日志同一行）
-        try:
-            # 移除之前可能残留的占位标签
-            for i in range(self.tabs.count() - 1, -1, -1):
-                w = self.tabs.widget(i)
-                if w is not None and w.objectName() == "_open_file_holder":
-                    self.tabs.removeTab(i)
-                    w.deleteLater()
-                    break
-            # 新增占位标签
-            holder = QtWidgets.QWidget()
-            holder.setObjectName("_open_file_holder")
-            idx = self.tabs.addTab(holder, "+ 打开文件")
-            self._open_file_tab_index = idx
-            # 顶层 tabs 默认不可关闭，占位标签自然不显示关闭按钮
-        except Exception:
-            self._open_file_tab_index = -1
 
         self.btn_save.setObjectName("PrimaryButton")
         self.btn_ai_ask.setObjectName("PrimaryButton")
@@ -3113,6 +3130,23 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.append_log("收到快捷键触发，尝试显示到前台")
         self._bring_to_front()
 
+    @QtCore.Slot()
+    def show_folder_favorites_from_hotkey(self) -> None:
+        """Ctrl+鼠标 全局快捷键：置前窗口并切换到「文件夹收藏」标签。"""
+        self.append_log("收到文件夹收藏快捷键 (Ctrl+鼠标)，切换到收藏标签")
+        self._bring_to_front()
+        if self.tabs is None or self._folder_favorites_tab_index < 0:
+            self.append_log("警告: 未找到文件夹收藏标签页")
+            return
+        self.tabs.setCurrentIndex(self._folder_favorites_tab_index)
+        if self._folder_favorites_panel is not None:
+            self._folder_favorites_panel.setFocus()
+
+    def _on_folder_hotkey_button_changed(self, button: str) -> None:
+        callback = getattr(self, "_folder_favorites_hotkey_callback", None)
+        if callable(callback):
+            callback(button)
+
     def _bring_to_front(self) -> None:
         is_hidden = self.isHidden()
         is_minimized = bool(self.windowState() & QtCore.Qt.WindowState.WindowMinimized)
@@ -3310,6 +3344,12 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 self._tree_folder_expanded_state = {}
         except Exception:
             self._tree_folder_expanded_state = {}
+        load_indent_display_options_from_settings(self._settings)
+
+    @QtCore.Slot()
+    def _apply_indent_display_settings(self) -> None:
+        """从 QSettings 重新加载 Python 缩进显示选项（设置页修改后触发）。"""
+        load_indent_display_options_from_settings(self._settings)
 
     def _restore_ai_tabs(self) -> None:
         """从 notepad_list 目录中的问AI文件恢复 AI 标签页"""

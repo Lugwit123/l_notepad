@@ -28,6 +28,27 @@ QLineEdit, QTextEdit, QComboBox {
   selection-background-color: rgba(77, 163, 255, 0.35);
 }
 
+QSpinBox, QDoubleSpinBox {
+  background: rgba(18, 24, 38, 0.96);
+  border: 1px solid rgba(137, 221, 255, 0.12);
+  border-radius: 10px;
+  padding: 6px 10px;
+  min-height: 28px;
+  min-width: 72px;
+}
+
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+  width: 20px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+  background: rgba(77, 163, 255, 0.2);
+}
+
 QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
   border: 1px solid rgba(77, 163, 255, 0.78);
   background: rgba(21, 30, 48, 0.98);
@@ -41,7 +62,7 @@ QTextEdit#CodeEditor, QPlainTextEdit#CodeEditor, LineNumberTextEdit#CodeEditor,
 QTextEdit#LogViewer, QPlainTextEdit#LogViewer, LineNumberTextEdit#LogViewer,
 QTextEdit#HelpViewer, QPlainTextEdit#HelpViewer, LineNumberTextEdit#HelpViewer,
 QTextEdit#AiAnswerViewer, QPlainTextEdit#AiAnswerViewer, LineNumberTextEdit#AiAnswerViewer {
-  background: #080D14;
+  background: #0C1016;
   color: #D6DEEB;
   border: 1px solid rgba(137, 221, 255, 0.13);
   font-family: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;

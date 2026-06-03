@@ -13,6 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import file_store
 from .api_client import ApiError, NoteDto
+from .folder_favorites_hotkey import FolderFavoritesHotkeyService
 from .ui import MainWindow
 
 
@@ -515,6 +516,34 @@ def main() -> int:
             QtCore.Q_ARG(str, message),
         )
 
+    ff_hotkey = FolderFavoritesHotkeyService(win)
+
+    def _on_ff_hotkey_triggered() -> None:
+        QtCore.QMetaObject.invokeMethod(
+            win,
+            "show_folder_favorites_from_hotkey",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+
+    def _on_ff_hotkey_started(ok: bool) -> None:
+        if ok:
+            _append_log("文件夹收藏全局快捷键已启动 (Ctrl+鼠标)")
+        else:
+            _append_log("文件夹收藏全局快捷键未启动")
+
+    def _on_ff_hotkey_failed(message: str) -> None:
+        _append_log(f"[WARN] {message}")
+
+    def _update_folder_favorites_hotkey(button: str) -> None:
+        ff_hotkey.set_trigger_button(button)
+        label = "中键" if button == "middle" else "左键"
+        _append_log(f"文件夹收藏快捷键已切换为 Ctrl+{label}")
+
+    win._folder_favorites_hotkey_callback = _update_folder_favorites_hotkey
+    ff_hotkey.started.connect(_on_ff_hotkey_started)
+    ff_hotkey.failed.connect(_on_ff_hotkey_failed)
+    ff_hotkey.start(_on_ff_hotkey_triggered)
+
     hotkey = DoubleKeyWatcher(
         lambda: QtCore.QMetaObject.invokeMethod(
             win, "show_from_hotkey", QtCore.Qt.ConnectionType.QueuedConnection
@@ -528,6 +557,7 @@ def main() -> int:
     win.show()
     code = int(app.exec())
     hotkey.release()
+    ff_hotkey.stop()
     if tray is not None:
         tray.hide()
     if lock is not None:

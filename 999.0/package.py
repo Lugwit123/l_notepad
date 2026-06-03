@@ -15,6 +15,7 @@ requires = [
     "pydantic",
     "pyside6",
     "l_qt_wgt_lib",
+    "l_folder_favorites",
 ]
 
 build_command = False

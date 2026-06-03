@@ -15,6 +15,17 @@ from PySide6 import QtCore, QtWidgets
 class SettingsWidget(QtWidgets.QWidget):
     """设置页面组件"""
 
+    indent_display_changed = QtCore.Signal()
+    folder_hotkey_changed = QtCore.Signal(str)
+    font_size_changed = QtCore.Signal(int)
+
+    _INDENT_MODE_ITEMS = (
+        ("不显示", "none"),
+        ("色块", "blocks"),
+        ("圆点", "dots"),
+        ("色块 + 圆点", "blocks_and_dots"),
+    )
+
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = QtCore.QSettings("Lugwit", "l_notepad_pc")
@@ -86,12 +97,55 @@ class SettingsWidget(QtWidgets.QWidget):
         self.hotkey_interval_spin.setRange(0.05, 1.0)
         self.hotkey_interval_spin.setSingleStep(0.05)
         self.hotkey_interval_spin.setSuffix(" 秒")
+        self.hotkey_interval_spin.setMinimumWidth(96)
         self.hotkey_interval_spin.valueChanged.connect(self._on_interval_changed)
         hotkey_layout.addRow("双击间隔:", self.hotkey_interval_spin)
 
         notepad_layout.addLayout(hotkey_layout)
         notepad_group.setLayout(notepad_layout)
         content_layout.addWidget(notepad_group)
+
+        # ===== 编辑器 / Python 缩进显示 =====
+        editor_group = self._create_group("📝 编辑器 · Python 缩进显示")
+        editor_layout = QtWidgets.QFormLayout()
+        editor_layout.setSpacing(10)
+
+        self.indent_mode_combo = QtWidgets.QComboBox()
+        for label, mode in self._INDENT_MODE_ITEMS:
+            self.indent_mode_combo.addItem(label, mode)
+        self.indent_mode_combo.currentIndexChanged.connect(self._on_indent_display_changed)
+        editor_layout.addRow("显示方式:", self.indent_mode_combo)
+
+        self.indent_opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.indent_opacity_slider.setRange(0, 100)
+        self.indent_opacity_slider.setValue(100)
+        self.indent_opacity_label = QtWidgets.QLabel("100%")
+        self.indent_opacity_label.setMinimumWidth(42)
+        opacity_row = QtWidgets.QHBoxLayout()
+        opacity_row.addWidget(self.indent_opacity_slider, 1)
+        opacity_row.addWidget(self.indent_opacity_label)
+        self.indent_opacity_slider.valueChanged.connect(self._on_indent_opacity_changed)
+        editor_layout.addRow("颜色深浅:", opacity_row)
+
+        self.indent_block_width_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.indent_block_width_slider.setRange(50, 100)
+        self.indent_block_width_slider.setValue(100)
+        self.indent_block_width_label = QtWidgets.QLabel("100%")
+        self.indent_block_width_label.setMinimumWidth(42)
+        width_row = QtWidgets.QHBoxLayout()
+        width_row.addWidget(self.indent_block_width_slider, 1)
+        width_row.addWidget(self.indent_block_width_label)
+        self.indent_block_width_slider.valueChanged.connect(self._on_indent_block_width_changed)
+        editor_layout.addRow("色块宽度:", width_row)
+
+        indent_hint = QtWidgets.QLabel(
+            "仅 Python 模式下行首缩进生效；切换后立即应用到所有编辑器。"
+        )
+        indent_hint.setStyleSheet("color: gray; font-size: 11px;")
+        editor_layout.addRow("", indent_hint)
+
+        editor_group.setLayout(editor_layout)
+        content_layout.addWidget(editor_group)
 
         # ===== 文件夹收藏设置区域 =====
         folder_fav_group = self._create_group("📁 文件夹收藏设置")
@@ -174,8 +228,15 @@ class SettingsWidget(QtWidgets.QWidget):
         font_layout.addWidget(font_label)
 
         self.font_size_spin = QtWidgets.QSpinBox()
-        self.font_size_spin.setRange(8, 24)
-        self.font_size_spin.setValue(10)
+        self.font_size_spin.setObjectName("SettingsFontSizeSpin")
+        self.font_size_spin.setRange(8, 28)
+        self.font_size_spin.setSingleStep(1)
+        self.font_size_spin.setSuffix(" pt")
+        self.font_size_spin.setMinimumWidth(96)
+        self.font_size_spin.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
         font_layout.addWidget(self.font_size_spin)
         font_layout.addStretch()
         general_layout.addLayout(font_layout)
@@ -232,8 +293,97 @@ class SettingsWidget(QtWidgets.QWidget):
         if index >= 0:
             self.theme_combo.setCurrentIndex(index)
 
-        font_size = self._settings.value("general/font_size", 10, type=int)
+        font_size = self._read_font_size_setting()
+        self.font_size_spin.blockSignals(True)
         self.font_size_spin.setValue(font_size)
+        self.font_size_spin.blockSignals(False)
+
+        self._load_indent_display_settings()
+
+    @staticmethod
+    def _read_font_size_from_settings(settings: QtCore.QSettings) -> int:
+        """与 MainWindow 一致：优先 ui/text_font_size，兼容旧键 general/font_size。"""
+        raw = settings.value("ui/text_font_size")
+        if raw is not None and str(raw).strip():
+            try:
+                return max(8, min(28, int(str(raw))))
+            except ValueError:
+                pass
+        legacy = settings.value("general/font_size", 10, type=int)
+        return max(8, min(28, int(legacy)))
+
+    def _read_font_size_setting(self) -> int:
+        return self._read_font_size_from_settings(self._settings)
+
+    def _load_indent_display_settings(self) -> None:
+        mode = str(self._settings.value("editor/indent_mode", "blocks"))
+        self.indent_mode_combo.blockSignals(True)
+        idx = self.indent_mode_combo.findData(mode)
+        if idx < 0:
+            idx = self.indent_mode_combo.findData("blocks")
+        if idx >= 0:
+            self.indent_mode_combo.setCurrentIndex(idx)
+        self.indent_mode_combo.blockSignals(False)
+
+        opacity = int(self._settings.value("editor/indent_opacity", 100))
+        opacity = max(0, min(100, opacity))
+        self.indent_opacity_slider.blockSignals(True)
+        self.indent_opacity_slider.setValue(opacity)
+        self.indent_opacity_slider.blockSignals(False)
+        self.indent_opacity_label.setText(f"{opacity}%")
+
+        block_width = int(self._settings.value("editor/indent_block_width", 100))
+        block_width = max(50, min(100, block_width))
+        self.indent_block_width_slider.blockSignals(True)
+        self.indent_block_width_slider.setValue(block_width)
+        self.indent_block_width_slider.blockSignals(False)
+        self.indent_block_width_label.setText(f"{block_width}%")
+        self._update_indent_width_controls_enabled()
+
+    def _current_indent_mode(self) -> str:
+        mode = self.indent_mode_combo.currentData()
+        return str(mode) if mode else "blocks"
+
+    def _update_indent_width_controls_enabled(self) -> None:
+        mode = self._current_indent_mode()
+        show_blocks = mode in ("blocks", "blocks_and_dots")
+        show_dots = mode in ("dots", "blocks_and_dots")
+        self.indent_block_width_slider.setEnabled(show_blocks)
+        self.indent_block_width_label.setEnabled(show_blocks)
+        self.indent_opacity_slider.setEnabled(mode != "none")
+        self.indent_opacity_label.setEnabled(mode != "none")
+        if not show_dots and not show_blocks:
+            return
+        if not show_blocks:
+            self.indent_block_width_label.setText("-")
+
+    def _save_indent_display_settings(self) -> None:
+        mode = self._current_indent_mode()
+        opacity = int(self.indent_opacity_slider.value())
+        block_width = int(self.indent_block_width_slider.value())
+        self._settings.setValue("editor/indent_mode", mode)
+        self._settings.setValue("editor/indent_opacity", opacity)
+        self._settings.setValue("editor/indent_block_width", block_width)
+        self._settings.sync()
+        self.indent_display_changed.emit()
+
+    def _on_indent_display_changed(self, _index: int = -1) -> None:
+        self._update_indent_width_controls_enabled()
+        self._save_indent_display_settings()
+
+    def _on_indent_opacity_changed(self, value: int) -> None:
+        self.indent_opacity_label.setText(f"{int(value)}%")
+        self._save_indent_display_settings()
+
+    def _on_indent_block_width_changed(self, value: int) -> None:
+        self.indent_block_width_label.setText(f"{int(value)}%")
+        self._save_indent_display_settings()
+
+    def _on_font_size_changed(self, size: int) -> None:
+        size = max(8, min(28, int(size)))
+        self._settings.setValue("ui/text_font_size", str(size))
+        self._settings.sync()
+        self.font_size_changed.emit(size)
 
     def _on_hotkey_changed(self, value: str) -> None:
         """热键改变"""
@@ -311,10 +461,10 @@ class SettingsWidget(QtWidgets.QWidget):
         self._save_folder_fav_hotkey()
 
     def _save_folder_fav_hotkey(self) -> None:
-        """保存文件夹收藏快捷键设置"""
         try:
             data = {"hotkey_button": self.hotkey_button}
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            self.folder_hotkey_changed.emit(self.hotkey_button)
         except Exception as e:
             print(f"保存文件夹收藏快捷键设置失败: {e}")
