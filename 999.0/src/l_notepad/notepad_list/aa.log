@@ -8,3 +8,8 @@
   检查是否有完整缓存 PKL
       ├─ 有 → 弹框询问："使用缓存（快速）" or "重新扫描（准确）"
       └─ 没有 → 直接扫描
+
+D:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\rez-package-source\l_script_editor\999.0\src\l_script_editor
+
+
+D:\TD_Depot\Wuzu_dev\anim_upload_muse_tool\src\anim_upload_muse_tool\@baselibs\l_script_editor

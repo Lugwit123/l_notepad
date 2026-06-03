@@ -26,6 +26,8 @@ except Exception:  # pragma: no cover - shiboken6 随 PySide6 提供，兜底避
     shiboken6 = None
 
 from .api_client import ApiError, NotepadApi, NoteDto
+from .folder_favorites_widget import FolderFavoritesWidget as FolderFavoritesPanel
+from .settings_widget import SettingsWidget
 
 # 从 l_qt_wgt_lib 导入代码编辑器组件
 from l_qt_wgt_lib.smart_widget import (
@@ -512,10 +514,6 @@ class RightPanel(QtWidgets.QWidget):
         self.btn_restart.setObjectName("btn_restart")
         btn_row.addWidget(self.btn_restart)
 
-        self.btn_hotkey = QtWidgets.QPushButton("快捷键", self)
-        self.btn_hotkey.setObjectName("btn_hotkey")
-        btn_row.addWidget(self.btn_hotkey)
-
         btn_row.addStretch()
 
         self.btn_ai_ask = QtWidgets.QPushButton("问AI", self)
@@ -552,7 +550,6 @@ class RightPanel(QtWidgets.QWidget):
             "btn_delete": self.btn_delete,
             "btn_ai_ask": self.btn_ai_ask,
             "btn_restart": self.btn_restart,
-            "btn_hotkey": self.btn_hotkey,
         }
         for key, widget in mapping.items():
             setattr(mw, key, widget)
@@ -715,7 +712,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             ("btn_favorite", self.btn_favorite),
             ("btn_ai_ask", self.btn_ai_ask),
             ("btn_restart", self.btn_restart),
-            ("btn_hotkey", self.btn_hotkey),
             ("log_view", self.log_view),
             ("ai_tabs", self.ai_tabs),
         ]
@@ -756,7 +752,18 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
         self._tab_main_widget = self.findChild(QtWidgets.QWidget, "tab_main")
         self._tab_log_widget = self.findChild(QtWidgets.QWidget, "tab_log")
+        self._folder_favorites_panel = FolderFavoritesPanel(self, restart_callback=self._restart_app)
+        self._settings_widget = SettingsWidget(self)
         if self.tabs is not None:
+            # 插入文件夹收藏标签页（索引 1）
+            self.tabs.insertTab(1, self._folder_favorites_panel, " 文件夹收藏")
+            # 插入设置标签页（在日志之前）
+            log_index = self.tabs.indexOf(self._tab_log_widget)
+            if log_index >= 0:
+                self.tabs.insertTab(log_index, self._settings_widget, "设置")
+            else:
+                # 如果找不到日志标签页，插入到最后
+                self.tabs.addTab(self._settings_widget, "设置")
             self.tabs.currentChanged.connect(self._on_main_tab_changed)
 
         self.log_view.setObjectName("LogViewer")
@@ -1921,7 +1928,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.btn_favorite.clicked.connect(self._toggle_favorite_current)
         self.btn_ai_ask.clicked.connect(self._ask_ai)
         self.btn_restart.clicked.connect(self._restart_app)
-        self.btn_hotkey.clicked.connect(self._open_hotkey_settings)
 
         # 编辑器事件过滤
         for editor_widget in (self.content_edit, self.ai_answer_edit):
@@ -3078,97 +3084,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     def _show_error(self, message: str) -> None:
         QtWidgets.QMessageBox.critical(self, "错误", message)
-
-    def _open_hotkey_settings(self) -> None:
-        """打开快捷键设置对话框。"""
-        from .local_main import HOTKEY_OPTIONS, DEFAULT_HOTKEY_KEY
-
-        current_gap_raw = self._settings.value("hotkey/double_ctrl_max_gap_sec", "0.15")
-        try:
-            current_gap = float(str(current_gap_raw))
-        except Exception:
-            current_gap = 0.15
-
-        current_key = str(self._settings.value("hotkey/double_key", DEFAULT_HOTKEY_KEY))
-        if current_key not in HOTKEY_OPTIONS:
-            current_key = DEFAULT_HOTKEY_KEY
-
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("快捷键设置")
-        dialog.resize(380, 220)
-        layout = QtWidgets.QVBoxLayout(dialog)
-
-        # 热键选择
-        key_layout = QtWidgets.QHBoxLayout()
-        key_layout.addWidget(QtWidgets.QLabel("触发按键:"))
-        key_combo = QtWidgets.QComboBox()
-        for key_id, (_, display_name) in HOTKEY_OPTIONS.items():
-            key_combo.addItem(f"双击 {display_name}", key_id)
-        idx = key_combo.findData(current_key)
-        if idx >= 0:
-            key_combo.setCurrentIndex(idx)
-        key_layout.addWidget(key_combo, 1)
-        layout.addLayout(key_layout)
-
-        # 双击间隔
-        gap_layout = QtWidgets.QHBoxLayout()
-        gap_layout.addWidget(QtWidgets.QLabel("双击最大间隔（秒）:"))
-        gap_spin = QtWidgets.QDoubleSpinBox()
-        gap_spin.setRange(0.08, 1.00)
-        gap_spin.setDecimals(2)
-        gap_spin.setSingleStep(0.05)
-        gap_spin.setValue(current_gap)
-        gap_layout.addWidget(gap_spin)
-        layout.addLayout(gap_layout)
-
-        # 提示
-        hint = QtWidgets.QLabel(
-            "说明：连按两次选定按键可将窗口前置。\n"
-            "间隔值越小，触发越灵敏；越大越不容易误触。"
-        )
-        hint.setStyleSheet("color: gray; font-size: 12px;")
-        layout.addWidget(hint)
-
-        layout.addStretch()
-
-        # 按钮
-        btn_layout = QtWidgets.QHBoxLayout()
-        btn_layout.addStretch()
-        btn_ok = QtWidgets.QPushButton("确定")
-        btn_cancel = QtWidgets.QPushButton("取消")
-        btn_layout.addWidget(btn_ok)
-        btn_layout.addWidget(btn_cancel)
-        layout.addLayout(btn_layout)
-
-        btn_ok.clicked.connect(dialog.accept)
-        btn_cancel.clicked.connect(dialog.reject)
-
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-
-        # 保存间隔
-        new_gap = max(0.08, min(1.00, gap_spin.value()))
-        new_key = key_combo.currentData()
-
-        changed = False
-        if abs(new_gap - current_gap) >= 0.001:
-            self._settings.setValue("hotkey/double_ctrl_max_gap_sec", f"{new_gap:.2f}")
-            if self._hotkey_interval_callback is not None:
-                self._hotkey_interval_callback(new_gap)
-            self.append_log(f"双击间隔已更新: {new_gap:.2f}s")
-            changed = True
-
-        if new_key != current_key:
-            self._settings.setValue("hotkey/double_key", new_key)
-            if self._hotkey_key_callback is not None:
-                self._hotkey_key_callback(new_key)
-            display_name = HOTKEY_OPTIONS.get(new_key, HOTKEY_OPTIONS[DEFAULT_HOTKEY_KEY])[1]
-            self.append_log(f"热键已切换为: 双击 {display_name}")
-            changed = True
-
-        if changed:
-            self._settings.sync()
-            self.status.showMessage("快捷键设置已保存", 3000)
 
     def _update_title(self) -> None:
         suffix = " *" if self.state.dirty else ""
