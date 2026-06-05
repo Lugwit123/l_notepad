@@ -1,15 +1,25 @@
-验证模式扫描也是两阶段,可以断点续传
+过了十多分钟监控才恢复
 
-点击扫描
-  ↓
-检查 PKL 断点信息（备份和验证模式）
-  ├─ 有未完成的 checkpoint 
-	弹框，显示断点信息,询问是否继续扫描,还是重新扫描（准确）,
-  检查是否有完整缓存 PKL
-      ├─ 有 → 弹框询问："使用缓存（快速）" or "重新扫描（准确）"
-      └─ 没有 → 直接扫描
+[2026-06-05 18:13:43] {WARNING}
+[arg0] "[7z元数据][缓存写回内存]"
+[arg1] ["资产ID", "6a1065d2d19ad343aabf2433"]
+[arg2] ["内部总大小", 12040546504]
+[arg3] ["分卷数", 4]
+[arg4] ["包体总大小", 5347706230]
+[arg5] ["压缩包数", 2]   ----code_context : lprint(
+            "[7z元数据][缓存写回内存]",
+            ("资产ID", getattr(asset, "asset_id", "")),
+            ("内部总大小", int(archive_meta["summary"]["inner_total_size"])),
+            ("分卷数", len(volume_parts)),
+            ("包体总大小", int(package_total_size)),
+            ("压缩包数", len(metadata_archives)),
+        )
+File: c:\users\wb.fengqingqing\packages\anim_upload_muse_tool\999.0.0\src\anim_upload_muse_tool\j_disc_backtomuse\backup_ui_helper.py:
+1460, -fn: _ensure_archive_metadata_from_download_cache, 打印次数: 4/4
 
-D:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\rez-package-source\l_script_editor\999.0\src\l_script_editor
-
-
-D:\TD_Depot\Wuzu_dev\anim_upload_muse_tool\src\anim_upload_muse_tool\@baselibs\l_script_editor
+2026-06-05 18:23:56,243 - pytracemp.usualFunc_helper.stall_monitor - INFO - [MainThread] 栈恢复变化
+2026-06-05 18:24:26,247 - pytracemp.usualFunc_helper.stall_monitor - WARNING - [MainThread] 检测到卡顿! 持续 20.0s, 位置: subprocess.p
+y:_communicate:1626→subprocess.py:communicate:1209→subprocess.py:run
+2026-06-05 18:25:01,253 - pytracemp.usualFunc_helper.stall_monitor - INFO - [MainThread] 栈恢复变化
+2026-06-05 18:25:31,257 - pytracemp.usualFunc_helper.stall_monitor - WARNING - [MainThread] 检测到卡顿! 持续 20.0s, 位置: subprocess.p
+y:_communicate:1626→subprocess.py:communicate:1209→subprocess.py:run

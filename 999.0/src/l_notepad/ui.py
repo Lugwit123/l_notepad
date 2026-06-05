@@ -482,13 +482,21 @@ class RightPanel(QtWidgets.QWidget):
         tpl.addWidget(self._ai_template_answer_edit)
 
         self.ai_tabs.addTab(self._ai_tab_template_widget, "Template")
-        root.addWidget(self.ai_tabs)
+        self.ai_tabs.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        root.addWidget(self.ai_tabs, 1)
 
         # ---- content_edit（普通笔记 / 外部文件 / 空态）
         self.content_edit = CodeEditorWidget(self)
         self.content_edit.setObjectName("content_edit")
         self.content_edit.setAcceptDrops(True)
-        root.addWidget(self.content_edit)
+        self.content_edit.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        root.addWidget(self.content_edit, 1)
 
         # ---- ai_answer_edit（旧版 AI 回答区，默认隐藏）
         self.ai_answer_edit = CodeEditorWidget(self)
@@ -496,7 +504,11 @@ class RightPanel(QtWidgets.QWidget):
         self.ai_answer_edit.setVisible(False)
         self.ai_answer_edit.setReadOnly(True)
         self.ai_answer_edit.setPlaceholderText("AI 回答会显示在这里")
-        root.addWidget(self.ai_answer_edit)
+        self.ai_answer_edit.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        root.addWidget(self.ai_answer_edit, 1)
 
         # ---- 操作按钮行
         btn_row = QtWidgets.QHBoxLayout()
@@ -1995,7 +2007,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if is_ai and ai_tabs_valid:
             self.ai_tabs.raise_()
         elif is_editor and content_valid:
-            self.content_edit.raise_()
+            self._raise_content_editor_surface()
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         parent = self.content_edit.parentWidget() if content_valid else None
         self.append_log(
@@ -2011,6 +2023,23 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             f"ai_answer_edit={self.ai_answer_edit.isVisible() if answer_valid else None}, "
             f"ai_tabs_count={self.ai_tabs.count() if ai_tabs_valid else None}"
         )
+
+    def _raise_content_editor_surface(self) -> None:
+        """抬起右侧内容编辑区域，同时保留 Markdown 预览层在最上方。"""
+        if not self._qt_is_valid(getattr(self, "content_edit", None)):
+            return
+        self.content_edit.raise_()
+        try:
+            if self.content_edit.is_markdown_preview_mode():
+                editor = self.content_edit.editor()
+                preview_view = getattr(editor, "_preview_view", None)
+                if preview_view is not None and self._qt_is_valid(preview_view):
+                    if hasattr(editor, "_sync_markdown_preview_geometry"):
+                        editor._sync_markdown_preview_geometry()
+                    preview_view.show()
+                    preview_view.raise_()
+        except Exception as exc:
+            self.append_debug_log(f"Markdown 预览层置顶跳过: {exc!r}")
 
     def _set_ai_controls_visible(self, visible: bool) -> None:
         """统一切换 AI 顶部/状态栏相关控件可见性。"""
