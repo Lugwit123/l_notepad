@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import ctypes
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +23,7 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._restart_callback = restart_callback  # 保存重启回调（兼容现有调用）
         self._last_clipboard_text = ""  # 上一次剪贴板内容
+        self._explorer_hwnd = None  # 收藏夹导航的资源管理器窗口句柄
         self._setup_data()
         self._setup_ui()
         self._refresh_list()
@@ -28,6 +32,11 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
         self._clipboard_timer = QtCore.QTimer(self)
         self._clipboard_timer.timeout.connect(self._refresh_clipboard_display)
         self._clipboard_timer.start(1000)
+
+    def set_caller_hwnd(self, hwnd: int) -> None:
+        """设置快捷键触发时的前台窗口句柄（由 ui.py 调用）"""
+        self._explorer_hwnd = hwnd
+        print(f"收藏夹已记录调用者窗口句柄: {hwnd}")
 
     def _setup_data(self) -> None:
         """初始化数据路径"""
@@ -268,53 +277,193 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
                 command = fav.get("command", "")
                 if command:
                     try:
-                        import subprocess
                         subprocess.Popen(command, shell=True)
                         print(f"执行命令: {command}")
                     except Exception as e:
                         QtWidgets.QMessageBox.warning(self, "错误", f"执行命令失败: {e}")
 
     def _navigate_to_folder(self, folder_path: str) -> None:
-        """导航到指定文件夹"""
+        """导航到指定文件夹（纯 Win32 API，不依赖 COM）"""
+        user32 = ctypes.windll.user32
+
+        # 优先使用快捷键触发时记录的前台窗口句柄
+        if self._explorer_hwnd and user32.IsWindow(self._explorer_hwnd):
+            hwnd = self._explorer_hwnd
+            if self._navigate_explorer_hwnd(hwnd, folder_path):
+                print(f"✓ 已导航到缓存窗口（句柄 {hwnd}）: {folder_path}")
+                return
+            print(f"✗ 缓存窗口导航失败，尝试其他 Explorer")
+
+        # 尝试查找任意一个 Explorer 窗口
+        found_hwnd = self._find_any_explorer_hwnd()
+        if found_hwnd:
+            if self._navigate_explorer_hwnd(found_hwnd, folder_path):
+                self._explorer_hwnd = found_hwnd
+                print(f"✓ 已导航到 Explorer 窗口（句柄 {found_hwnd}）: {folder_path}")
+                return
+
+        # 没有 Explorer 窗口，打开新窗口
+        print(f"✓ 没有 Explorer 窗口，打开新窗口: {folder_path}")
+        os.startfile(folder_path)
+
+    @classmethod
+    def _find_any_explorer_hwnd(cls) -> int | None:
+        """通过 FindWindowW 查找 CabinetWClass 窗口"""
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.restype = ctypes.c_void_p
+        hwnd = user32.FindWindowW("CabinetWClass", None)
+        return hwnd if hwnd else None
+
+    def _navigate_explorer_hwnd(self, hwnd: int, folder_path: str) -> bool:
+        """通过模拟按键在 Explorer 窗口地址栏中导航"""
+        user32 = ctypes.windll.user32
+        VK_F4 = 0x73
+        VK_RETURN = 0x0D
+        VK_ESCAPE = 0x1B
+
         try:
-            import win32com.client
-            import pythoncom
+            # 1. 让 Explorer 窗口置前
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.1)
 
-            try:
-                pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-            except Exception:
-                pythoncom.CoInitialize()
+            # 2. 发送 F4 激活地址栏（Explorer 标准快捷键）
+            user32.keybd_event(VK_F4, 0, 0, 0)
+            user32.keybd_event(VK_F4, 0, 2, 0)  # KEYEVENTF_KEYUP = 2
+            time.sleep(0.15)
 
-            try:
-                shell = win32com.client.Dispatch("Shell.Application")
-                windows = shell.Windows()
+            # 3. 找到地址栏的 Edit 控件（F4 激活后地址栏变为可编辑的 Edit）
+            edit_hwnd = self._find_address_bar_edit(hwnd)
+            if edit_hwnd:
+                # 直接设置文本 + 回车
+                user32.SetWindowTextW(edit_hwnd, folder_path)
+                user32.keybd_event(VK_RETURN, 0, 0, 0)
+                user32.keybd_event(VK_RETURN, 0, 2, 0)
+                print(f"  通过 Edit 控件导航: edit_hwnd={edit_hwnd}")
+                return True
 
-                for i in range(windows.Count):
-                    try:
-                        win = windows.Item(i)
-                        if win is None:
-                            continue
-                        if hasattr(win, "Document") and hasattr(win.Document, "Folder"):
-                            win.Navigate(folder_path)
-                            print(f"✓ 已导航到: {folder_path}")
-                            return
-                    except Exception:
-                        continue
-
-                # 如果没有找到窗口，打开新窗口
-                shell.Open(folder_path)
-                print(f"✓ 已打开新窗口: {folder_path}")
-
-            finally:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
+            # 4. 找不到 Edit 控件（Windows 11 XAML 地址栏），回退到剪贴板 + 粘贴方式
+            print(f"  未找到 Edit 控件，回退到剪贴板粘贴方式")
+            clipboard = QtWidgets.QApplication.clipboard()
+            clipboard.setText(folder_path)
+            time.sleep(0.05)
+            # Ctrl+A 全选地址栏现有内容（防止路径被追加到末尾）
+            user32.keybd_event(0x11, 0, 0, 0)  # VK_CONTROL down
+            user32.keybd_event(0x41, 0, 0, 0)  # VK_A down
+            user32.keybd_event(0x41, 0, 2, 0)  # VK_A up
+            user32.keybd_event(0x11, 0, 2, 0)  # VK_CONTROL up
+            time.sleep(0.05)
+            # Ctrl+V 粘贴（替换已全选的内容）
+            user32.keybd_event(0x11, 0, 0, 0)  # VK_CONTROL down
+            user32.keybd_event(0x56, 0, 0, 0)  # VK_V down
+            user32.keybd_event(0x56, 0, 2, 0)  # VK_V up
+            user32.keybd_event(0x11, 0, 2, 0)  # VK_CONTROL up
+            time.sleep(0.05)
+            # 回车确认导航
+            user32.keybd_event(VK_RETURN, 0, 0, 0)
+            user32.keybd_event(VK_RETURN, 0, 2, 0)
+            return True
 
         except Exception as e:
             print(f"✗ 导航失败: {e}")
-            # 回退到传统方式
-            os.startfile(folder_path)
+            return False
+
+    # ===== Explorer 窗口控件分析 =====
+
+    @staticmethod
+    def dump_explorer_tree() -> str:
+        """遍历所有 Explorer 窗口的完整控件树，返回可读的层级文本"""
+        user32 = ctypes.windll.user32
+        find_ex = user32.FindWindowExW
+        find_ex.restype = ctypes.c_void_p
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        results: list[str] = []
+
+        def _enum_cb(hwnd, _lparam):
+            cls_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, cls_buf, 256)
+            if cls_buf.value == "CabinetWClass":
+                title_buf = ctypes.create_unicode_buffer(512)
+                user32.GetWindowTextW(hwnd, title_buf, 512)
+                results.append(f"\n=== Explorer  hwnd={hwnd}  title={title_buf.value!r} ===")
+                FolderFavoritesWidget._dump_children(hwnd, find_ex, user32, results, depth=1)
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
+        return "\n".join(results) if results else "未找到任何 Explorer 窗口"
+
+    @staticmethod
+    def _dump_children(parent_hwnd: int, find_ex, user32, results: list[str], depth: int, max_depth: int = 15) -> None:
+        """递归遍历子窗口并 append 到 results"""
+        if depth > max_depth:
+            return
+        indent = "  " * depth
+        child = find_ex(parent_hwnd, 0, None, None)
+        while child:
+            cls_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(child, cls_buf, 256)
+            cls_name = cls_buf.value
+
+            title_buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(child, title_buf, 256)
+            title = title_buf.value
+
+            # 获取窗口尺寸
+            r = (ctypes.c_long * 4)()
+            user32.GetWindowRect(child, ctypes.byref(r))
+            w = r[2] - r[0]
+            h = r[3] - r[1]
+
+            info = f"{indent}[{cls_name}]  hwnd={child}  size={w}x{h}"
+            if title:
+                info += f"  text={title!r}"
+            results.append(info)
+
+            FolderFavoritesWidget._dump_children(child, find_ex, user32, results, depth + 1, max_depth)
+            child = find_ex(parent_hwnd, child, None, None)
+
+    @staticmethod
+    def _find_address_bar_edit(explorer_hwnd: int) -> int | None:
+        """查找 Explorer 地址栏的 Edit 控件（通过 FindWindowExW 逐层遍历）"""
+        user32 = ctypes.windll.user32
+        find = user32.FindWindowExW
+        find.restype = ctypes.c_void_p
+
+        # Explorer 控件层级:
+        # CabinetWClass
+        #   └─ WorkerW
+        #       └─ ReBarWindow32
+        #           └─ Address Band Root
+        #               └─ ComboBoxEx32
+        #                   └─ ComboBox
+        #                       └─ Edit
+        worker = find(explorer_hwnd, 0, "WorkerW", None)
+        if not worker:
+            return None
+        rebar = find(worker, 0, "ReBarWindow32", None)
+        if not rebar:
+            return None
+        # 遍历 ReBarWindow32 的子窗口查找 "Address Band Root"
+        child = find(rebar, 0, None, None)
+        addr_band = 0
+        while child:
+            cls_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(child, cls_buf, 256)
+            if cls_buf.value == "Address Band Root":
+                addr_band = child
+                break
+            child = find(rebar, child, None, None)
+        if not addr_band:
+            return None
+        combo_ex = find(addr_band, 0, "ComboBoxEx32", None)
+        if not combo_ex:
+            return None
+        combo = find(combo_ex, 0, "ComboBox", None)
+        if not combo:
+            return None
+        edit = find(combo, 0, "Edit", None)
+        return edit if edit else None
 
     def _show_context_menu(self, position: QtCore.QPoint) -> None:
         """显示右键菜单"""

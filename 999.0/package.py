@@ -33,7 +33,7 @@ def commands():
 
     # Pure PC mode: local file-based notes, no backend process.
     # 使用 cmd /c 包装以设置 UTF-8 代码页
-    alias("l_notepad", 'cmd /c "chcp 65001 >nul & python -m l_notepad.local_main"')
+    alias("l_notepad", 'python -m l_notepad.local_main"')
     # Keep original behavior: launch UI with embedded backend service.
     alias("l_notepad_with_api", "python -m l_notepad.main")
     alias("l_notepad_api", "python -m l_notepad.backend_server")

@@ -524,10 +524,6 @@ class RightPanel(QtWidgets.QWidget):
         self.btn_delete.setObjectName("btn_delete")
         btn_row.addWidget(self.btn_delete)
 
-        self.btn_restart = QtWidgets.QPushButton("重启", self)
-        self.btn_restart.setObjectName("btn_restart")
-        btn_row.addWidget(self.btn_restart)
-
         btn_row.addStretch()
 
         self.btn_ai_ask = QtWidgets.QPushButton("问AI", self)
@@ -563,7 +559,6 @@ class RightPanel(QtWidgets.QWidget):
             "btn_save": self.btn_save,
             "btn_delete": self.btn_delete,
             "btn_ai_ask": self.btn_ai_ask,
-            "btn_restart": self.btn_restart,
         }
         for key, widget in mapping.items():
             setattr(mw, key, widget)
@@ -627,6 +622,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.setStyleSheet(_load_stylesheet())
         self.setWindowTitle("L Notepad")
         self.resize(980, 640)
+        self._normal_width = 980  # 正常宽度，Ctrl+中键会缩小到 400px，双击 Ctrl 恢复
         icon_path = Path(__file__).resolve().parent / "static" / "favicon.svg"
         if icon_path.exists():
             self.setWindowIcon(QtGui.QIcon(str(icon_path)))
@@ -725,7 +721,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             ("btn_refresh", self.btn_refresh),
             ("btn_favorite", self.btn_favorite),
             ("btn_ai_ask", self.btn_ai_ask),
-            ("btn_restart", self.btn_restart),
             ("log_view", self.log_view),
             ("ai_tabs", self.ai_tabs),
         ]
@@ -785,6 +780,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 # 如果找不到日志标签页，插入到最后
                 self.tabs.addTab(self._settings_widget, "设置")
             self._ensure_open_file_tab()
+            # 重启按钮放在标签栏右上角（「+ 打开文件」标签右侧）
+            self.btn_restart = QtWidgets.QPushButton("重启", self)
+            self.btn_restart.setObjectName("btn_restart")
+            self.btn_restart.clicked.connect(self._restart_app)
+            self.tabs.setCornerWidget(self.btn_restart, QtCore.Qt.Corner.TopRightCorner)
             self._settings_widget.indent_display_changed.connect(
                 self._apply_indent_display_settings
             )
@@ -1956,7 +1956,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.btn_refresh.clicked.connect(self.refresh_notes)
         self.btn_favorite.clicked.connect(self._toggle_favorite_current)
         self.btn_ai_ask.clicked.connect(self._ask_ai)
-        self.btn_restart.clicked.connect(self._restart_app)
 
         # 编辑器事件过滤
         for editor_widget in (self.content_edit, self.ai_answer_edit):
@@ -3157,13 +3156,47 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     @QtCore.Slot()
     def show_from_hotkey(self) -> None:
         self.append_log("收到快捷键触发，尝试显示到前台")
+        # 恢复为正常宽度（如果之前被 Ctrl+中键 缩小到 400px）
+        if hasattr(self, "_normal_width") and self._normal_width is not None:
+            self.resize(self._normal_width, self.height())
+            self.append_log(f"恢复正常宽度: {self._normal_width}px")
         self._bring_to_front()
 
     @QtCore.Slot()
     def show_folder_favorites_from_hotkey(self) -> None:
-        """Ctrl+鼠标 全局快捷键：置前窗口并切换到「文件夹收藏」标签。"""
-        self.append_log("收到文件夹收藏快捷键 (Ctrl+鼠标)，切换到收藏标签")
+        """Ctrl+鼠标 全局快捷键：将窗口右侧中部对齐鼠标位置，宽度设为400px，并切换到「文件夹收藏」标签。"""
+        self.append_log("收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签")
+        # 在 _bring_to_front 之前捕获前台窗口（此时前台窗口正是 Explorer）
+        try:
+            fg_hwnd = int(ctypes.windll.user32.GetForegroundWindow())
+            self.append_log(f"快捷键触发时前台窗口句柄: {fg_hwnd}")
+        except Exception:
+            fg_hwnd = 0
+        # 将前台窗口句柄传给收藏夹面板
+        if self._folder_favorites_panel is not None and fg_hwnd:
+            self._folder_favorites_panel.set_caller_hwnd(fg_hwnd)
+        # 保存正常宽度，然后缩小到 400px
+        if not hasattr(self, "_normal_width") or self._normal_width is None:
+            self._normal_width = self.width()
+        target_width = 400
+        self.resize(target_width, self.height())
         self._bring_to_front()
+        # 将窗口右侧中部对齐鼠标光标位置
+        cursor_pos = QtGui.QCursor.pos()
+        win_height = self.height()
+        # 窗口右侧中部 = (x + width, y + height/2)，对齐到鼠标 => x=cursorX - width, y=cursorY - height/2
+        new_x = cursor_pos.x() - target_width
+        new_y = cursor_pos.y() - win_height // 2
+        # 确保窗口不超出屏幕上方
+        screen = QtWidgets.QApplication.screenAt(cursor_pos) or QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            new_y = max(geo.top(), min(new_y, geo.bottom() - win_height))
+            new_x = max(geo.left(), min(new_x, geo.right() - self.width()))
+        self.move(new_x, new_y)
+        # 保存位置以便下次恢复
+        self._saved_pos = QtCore.QPoint(new_x, new_y)
+        self.append_log(f"窗口右侧中部已对齐鼠标: cursor=({cursor_pos.x()},{cursor_pos.y()}), win_pos=({new_x},{new_y})")
         if self.tabs is None or self._folder_favorites_tab_index < 0:
             self.append_log("警告: 未找到文件夹收藏标签页")
             return
