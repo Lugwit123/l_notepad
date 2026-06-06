@@ -311,7 +311,7 @@ def create_app(db_path: Path) -> FastAPI:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="L Notepad backend server")
-    parser.add_argument("--host", default=os.environ.get("L_NOTEPAD_HOST", "127.0.0.1"))
+    parser.add_argument("--host", default=os.environ.get("L_NOTEPAD_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("L_NOTEPAD_PORT", "8765")))
     parser.add_argument("--db", default=None, help="sqlite db path (default: package data/notepad.sqlite3)")
     parser.add_argument("--log-level", default=os.environ.get("L_NOTEPAD_LOG_LEVEL", "info"))

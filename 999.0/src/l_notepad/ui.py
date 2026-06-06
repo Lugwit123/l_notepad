@@ -1349,6 +1349,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 item_id.startswith("__folder__:") or item_id.startswith("__empty__")
                 or item_id == SERVER_LOG_FOLDER_ID
                 or item_id.startswith(SERVER_LOG_SUB_PREFIX)
+                or item_id == "__server_log_error__"
             ):
                 continue
             if int(item_id) == int(note_id):
@@ -1533,6 +1534,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if isinstance(item_id, str) and (
             item_id == SERVER_LOG_FOLDER_ID
             or item_id.startswith(SERVER_LOG_SUB_PREFIX)
+            or item_id == "__server_log_error__"
         ):
             return
         note_id = int(item_id)
@@ -2124,26 +2126,25 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     # ===== 服务器日志文件浏览（通过 API 获取） =====
 
-    def _fetch_server_logs(self) -> list[LogDto]:
-        """通过 API 获取服务器日志列表。"""
+    def _fetch_server_logs(self) -> tuple[list[LogDto], str | None]:
+        """通过 API 获取服务器日志列表。返回 (logs, error_msg)。"""
         try:
-            return self.api.list_logs()
+            return self.api.list_logs(), None
         except Exception as e:
-            self.append_log(f"获取服务器日志列表失败: {e}")
-            return []
+            msg = f"获取服务器日志列表失败: {e}"
+            print(f"[l_notepad] ERROR: {msg}")
+            self.append_log(msg)
+            return [], msg
 
     def _add_server_log_files_to_tree(
         self, tree: QtWidgets.QTreeWidget, query: str = ""
     ) -> None:
         """在文件树中添加服务器日志虚拟文件夹。"""
-        logs = self._fetch_server_logs()
-        if not logs:
-            return
-        if query:
+        logs, error_msg = self._fetch_server_logs()
+        if query and logs:
             logs = [log for log in logs if query.lower() in log.path.lower()]
-            if not logs:
-                return
 
+        # 始终显示文件夹，即使为空或失败
         log_folder = QtWidgets.QTreeWidgetItem(["\u25be \U0001f4cb \u670d\u52a1\u5668\u65e5\u5fd7"])
         log_folder.setData(0, QtCore.Qt.ItemDataRole.UserRole, SERVER_LOG_FOLDER_ID)
         log_folder.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, "\u670d\u52a1\u5668\u65e5\u5fd7")
@@ -2155,6 +2156,18 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             0, QtGui.QBrush(QtGui.QColor("rgba(249, 168, 37, 0.06)"))
         )
         tree.addTopLevelItem(log_folder)
+
+        # 失败时显示错误提示
+        if error_msg:
+            err_item = QtWidgets.QTreeWidgetItem([f"\u26a0 {error_msg}"])
+            err_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, "__server_log_error__")
+            err_item.setForeground(0, QtGui.QBrush(QtGui.QColor("#e57373")))
+            log_folder.addChild(err_item)
+            log_folder.setExpanded(True)
+            return
+
+        if not logs:
+            return
 
         sub_folders: dict[str, QtWidgets.QTreeWidgetItem] = {}
 
@@ -2225,14 +2238,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     def _add_server_log_files_to_list(self, query: str = "") -> None:
         """在文件列表中添加服务器日志虚拟文件夹。"""
-        logs = self._fetch_server_logs()
-        if not logs:
-            return
-        if query:
+        logs, error_msg = self._fetch_server_logs()
+        if query and logs:
             logs = [log for log in logs if query.lower() in log.path.lower()]
-            if not logs:
-                return
 
+        # 始终显示文件夹头
         folder_header = QtWidgets.QListWidgetItem(
             "\U0001f4cb \u670d\u52a1\u5668\u65e5\u5fd7"
         )
@@ -2251,6 +2261,15 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         )
         folder_header.setSizeHint(QtCore.QSize(0, 28))
         self.notes_list.addItem(folder_header)
+
+        if error_msg:
+            err_item = QtWidgets.QListWidgetItem(f"  \u26a0 {error_msg}")
+            err_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            err_item.setData(QtCore.Qt.ItemDataRole.UserRole, "__server_log_error__")
+            err_item.setForeground(QtGui.QBrush(QtGui.QColor("#e57373")))
+            err_item.setSizeHint(QtCore.QSize(0, 28))
+            self.notes_list.addItem(err_item)
+            return
 
         for log in logs:
             size_str = self._format_file_size(log.size)
@@ -2282,6 +2301,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             data = self.api.get_log(log_path)
             content = data.get("content", "")
         except Exception as e:
+            print(f"[l_notepad] ERROR: 获取日志文件失败: {e}")
             self._show_error(f"\u83b7\u53d6\u65e5\u5fd7\u6587\u4ef6\u5931\u8d25\uff1a{e}")
             return
         file_name = PurePosixPath(log_path).name
@@ -2422,6 +2442,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             item_id.startswith("__folder__:") or item_id.startswith("__empty__")
             or item_id.startswith(SERVER_LOG_PREFIX) or item_id == SERVER_LOG_FOLDER_ID
             or item_id.startswith(SERVER_LOG_SUB_PREFIX)
+            or item_id == "__server_log_error__"
         )):
             return
         note_id = int(item_id)

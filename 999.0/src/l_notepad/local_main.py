@@ -449,11 +449,9 @@ class LocalNotepadApi:
         return Path(os.environ.get("L_NOTEPAD_LOG_DIR", r"D:\Temp\Log"))
 
     def list_logs(self, max_size: int = 2 * 1024 * 1024) -> list[LogDto]:
-        """List server log files. Uses remote server if configured, otherwise local filesystem."""
-        remote = self._log_server_url()
-        if remote:
-            return self._list_logs_remote(remote)
-        return self._list_logs_local(max_size)
+        """List server log files from remote server."""
+        remote_url = self._log_server_url()
+        return self._list_logs_remote(remote_url)
 
     def _list_logs_remote(self, base_url: str) -> list[LogDto]:
         """Fetch log list from remote server via HTTP."""
@@ -462,10 +460,11 @@ class LocalNotepadApi:
         import urllib.error
         try:
             req = urllib.request.Request(f"{base_url}/api/logs")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             return [LogDto(**x) for x in (data or [])]
         except Exception as e:
+            print(f"[l_notepad] ERROR: Remote log list failed: {e}")
             raise ApiError(f"Remote log list failed: {e}") from e
 
     def _list_logs_local(self, max_size: int = 2 * 1024 * 1024) -> list[LogDto]:
@@ -495,11 +494,9 @@ class LocalNotepadApi:
         return result
 
     def get_log(self, log_path: str) -> dict[str, str]:
-        """Get server log content. Uses remote server if configured, otherwise local filesystem."""
-        remote = self._log_server_url()
-        if remote:
-            return self._get_log_remote(remote, log_path)
-        return self._get_log_local(log_path)
+        """Get server log content from remote server."""
+        remote_url = self._log_server_url()
+        return self._get_log_remote(remote_url, log_path)
 
     def _get_log_remote(self, base_url: str, log_path: str) -> dict[str, str]:
         """Fetch log content from remote server via HTTP."""
@@ -512,6 +509,7 @@ class LocalNotepadApi:
                 data = json.loads(resp.read().decode("utf-8"))
             return data
         except Exception as e:
+            print(f"[l_notepad] ERROR: Remote get log failed: {e}")
             raise ApiError(f"Remote get log failed: {e}") from e
 
     def _get_log_local(self, log_path: str) -> dict[str, str]:
