@@ -8,7 +8,7 @@ authors = ["Lugwit Team"]
 # NOTE:
 # - sqlite3 is in stdlib
 requires = [
-    "python-3.12+<3.13",
+    "python-3.12.10",
     "fastapi",
     "uvicorn",
     "jinja2",
