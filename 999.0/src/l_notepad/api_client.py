@@ -22,6 +22,14 @@ class NoteDto:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class LogDto:
+    """Server log file metadata."""
+    path: str       # relative posix path
+    size: int       # file size in bytes
+    mtime: str      # ISO timestamp
+
+
 def _read_json(resp) -> Any:
     raw = resp.read()
     if not raw:
@@ -55,6 +63,14 @@ class NotepadApi:
 
     def delete_note(self, note_id: int) -> None:
         self._delete(f"/api/notes/{note_id}")
+
+    def list_logs(self) -> list[LogDto]:
+        data = self._get("/api/logs")
+        return [LogDto(**x) for x in (data or [])]
+
+    def get_log(self, log_path: str) -> dict[str, str]:
+        """Fetch server log content. Returns {'path': ..., 'content': ...}."""
+        return self._get(f"/api/logs/{log_path}")
 
     def _get(self, path: str) -> Any:
         return self._request("GET", path, None)

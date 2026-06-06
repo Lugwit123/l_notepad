@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PySide6 import QtCore, QtGui, QtUiTools, QtWidgets
 try:
@@ -25,7 +25,7 @@ try:
 except Exception:  # pragma: no cover - shiboken6 随 PySide6 提供，兜底避免导入异常
     shiboken6 = None
 
-from .api_client import ApiError, NotepadApi, NoteDto
+from .api_client import ApiError, LogDto, NotepadApi, NoteDto
 from .folder_favorites_widget import FolderFavoritesWidget as FolderFavoritesPanel
 from .settings_widget import SettingsWidget
 
@@ -76,6 +76,9 @@ DEFAULT_PROVIDER = "SiliconFlow"
 ASK_AI_ITEM_ID = "__ask_ai__"
 ASK_AI_SESSION_PREFIX = "__ask_ai_session__:"
 EXTERNAL_FILE_PREFIX = "__external_file__:"
+SERVER_LOG_PREFIX = "__server_log__:"
+SERVER_LOG_FOLDER_ID = "__server_log_folder__"
+SERVER_LOG_SUB_PREFIX = "__server_log_sub__:"
 EXTERNAL_FILES_STATE_NAME = "external_files.json"
 LOG_VIEW_CONTENT_CACHE_KEY = "__l_notepad_log_view__"
 LOG_LEVEL = logging.INFO
@@ -1074,6 +1077,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             item.setSizeHint(QtCore.QSize(0, 44))
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             self.notes_list.addItem(item)
+        self._add_server_log_files_to_list(query=query)
         self.notes_list.blockSignals(False)
 
     def _refresh_notes_tree(self, grouped_notes: list[tuple[str, list[NoteDto]]], *, query: str = "") -> None:
@@ -1115,10 +1119,13 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if grouped_notes:
             for folder_name, folder_items in grouped_notes:
                 if folder_name == "":
-                    # 根目录文件（folder_name 为空）作为顶层独立项，
-                    # 不再错误塞入「问AI」分组
-                    for n in folder_items:
-                        tree.addTopLevelItem(self._create_note_tree_item(n))
+                    # 根目录文件放入「未归档」文件夹，不散落在最外层
+                    if folder_items:
+                        root_parent = self._ensure_tree_folder_item(tree, "未归档")
+                        if root_parent is None:
+                            root_parent = tree.invisibleRootItem()
+                        for n in folder_items:
+                            root_parent.addChild(self._create_note_tree_item(n))
                 else:
                     parent = self._ensure_tree_folder_item(tree, folder_name)
                     if parent is None:
@@ -1136,6 +1143,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             item = QtWidgets.QTreeWidgetItem([f"↗ {path.name}", file_path])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"{EXTERNAL_FILE_PREFIX}{file_path}")
             tree.addTopLevelItem(item)
+        self._add_server_log_files_to_tree(tree, query=query)
         # ② 按持久化的展开状态恢复（未记录的文件夹默认展开；ASK_AI 默认折叠由外部控制）
         def _restore_expand_walk(node: QtWidgets.QTreeWidgetItem) -> None:
             role = node.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
@@ -1335,7 +1343,13 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 continue
             if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
                 continue
-            if isinstance(item_id, str) and (item_id.startswith("__folder__:") or item_id.startswith("__empty__")):
+            if isinstance(item_id, str) and item_id.startswith(SERVER_LOG_PREFIX):
+                continue
+            if isinstance(item_id, str) and (
+                item_id.startswith("__folder__:") or item_id.startswith("__empty__")
+                or item_id == SERVER_LOG_FOLDER_ID
+                or item_id.startswith(SERVER_LOG_SUB_PREFIX)
+            ):
                 continue
             if int(item_id) == int(note_id):
                 self.notes_list.setCurrentRow(i)
@@ -1510,6 +1524,16 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
             self.append_log(f"切换到外部文件: {item_id[len(EXTERNAL_FILE_PREFIX):]}")
             self._set_external_file_editor(item_id[len(EXTERNAL_FILE_PREFIX):])
+            return
+        if isinstance(item_id, str) and item_id.startswith(SERVER_LOG_PREFIX):
+            log_path = item_id[len(SERVER_LOG_PREFIX):]
+            self.append_log(f"切换到服务器日志: {log_path}")
+            self._set_server_log_editor(log_path)
+            return
+        if isinstance(item_id, str) and (
+            item_id == SERVER_LOG_FOLDER_ID
+            or item_id.startswith(SERVER_LOG_SUB_PREFIX)
+        ):
             return
         note_id = int(item_id)
         try:
@@ -2098,6 +2122,187 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._save_external_files_state()
         self._update_title()
 
+    # ===== 服务器日志文件浏览（通过 API 获取） =====
+
+    def _fetch_server_logs(self) -> list[LogDto]:
+        """通过 API 获取服务器日志列表。"""
+        try:
+            return self.api.list_logs()
+        except Exception as e:
+            self.append_log(f"获取服务器日志列表失败: {e}")
+            return []
+
+    def _add_server_log_files_to_tree(
+        self, tree: QtWidgets.QTreeWidget, query: str = ""
+    ) -> None:
+        """在文件树中添加服务器日志虚拟文件夹。"""
+        logs = self._fetch_server_logs()
+        if not logs:
+            return
+        if query:
+            logs = [log for log in logs if query.lower() in log.path.lower()]
+            if not logs:
+                return
+
+        log_folder = QtWidgets.QTreeWidgetItem(["\u25be \U0001f4cb \u670d\u52a1\u5668\u65e5\u5fd7"])
+        log_folder.setData(0, QtCore.Qt.ItemDataRole.UserRole, SERVER_LOG_FOLDER_ID)
+        log_folder.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, "\u670d\u52a1\u5668\u65e5\u5fd7")
+        folder_font = log_folder.font(0)
+        folder_font.setBold(True)
+        log_folder.setFont(0, folder_font)
+        log_folder.setForeground(0, QtGui.QBrush(QtGui.QColor("#F9A825")))
+        log_folder.setBackground(
+            0, QtGui.QBrush(QtGui.QColor("rgba(249, 168, 37, 0.06)"))
+        )
+        tree.addTopLevelItem(log_folder)
+
+        sub_folders: dict[str, QtWidgets.QTreeWidgetItem] = {}
+
+        for log in logs:
+            rel = PurePosixPath(log.path)
+            parts = list(rel.parts)
+            file_name = parts[-1]
+            sub_parts = parts[:-1]
+
+            parent_item = log_folder
+            if sub_parts:
+                cumulative: list[str] = []
+                for sp in sub_parts:
+                    cumulative.append(sp)
+                    key = "/".join(cumulative)
+                    if key not in sub_folders:
+                        sub_item = QtWidgets.QTreeWidgetItem(
+                            [f"\u25be \U0001f4c1 {sp}"]
+                        )
+                        sub_item.setData(
+                            0,
+                            QtCore.Qt.ItemDataRole.UserRole,
+                            f"{SERVER_LOG_SUB_PREFIX}{key}",
+                        )
+                        sub_item.setData(
+                            0, QtCore.Qt.ItemDataRole.UserRole + 1, sp
+                        )
+                        sf = sub_item.font(0)
+                        sf.setBold(True)
+                        sub_item.setFont(0, sf)
+                        sub_item.setForeground(
+                            0, QtGui.QBrush(QtGui.QColor("#F9A825"))
+                        )
+                        sub_item.setBackground(
+                            0,
+                            QtGui.QBrush(
+                                QtGui.QColor("rgba(249, 168, 37, 0.04)")
+                            ),
+                        )
+                        parent_item.addChild(sub_item)
+                        sub_folders[key] = sub_item
+                    parent_item = sub_folders[key]
+
+            size_str = self._format_file_size(log.size)
+            try:
+                mtime_dt = datetime.fromisoformat(log.mtime)
+                mtime = mtime_dt.strftime("%m-%d %H:%M")
+            except (ValueError, TypeError):
+                mtime = log.mtime
+
+            item = QtWidgets.QTreeWidgetItem(
+                [f"\U0001f4c4 {file_name}\n{mtime}  {size_str}"]
+            )
+            item.setData(
+                0,
+                QtCore.Qt.ItemDataRole.UserRole,
+                f"{SERVER_LOG_PREFIX}{log.path}",
+            )
+            item.setToolTip(0, log.path)
+            item.setForeground(
+                0, QtGui.QBrush(QtGui.QColor("#d4d4d4"))
+            )
+            parent_item.addChild(item)
+
+        log_folder.setExpanded(True)
+        for sub_item in sub_folders.values():
+            sub_item.setExpanded(True)
+
+    def _add_server_log_files_to_list(self, query: str = "") -> None:
+        """在文件列表中添加服务器日志虚拟文件夹。"""
+        logs = self._fetch_server_logs()
+        if not logs:
+            return
+        if query:
+            logs = [log for log in logs if query.lower() in log.path.lower()]
+            if not logs:
+                return
+
+        folder_header = QtWidgets.QListWidgetItem(
+            "\U0001f4cb \u670d\u52a1\u5668\u65e5\u5fd7"
+        )
+        folder_header.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+        folder_header.setData(
+            QtCore.Qt.ItemDataRole.UserRole, SERVER_LOG_FOLDER_ID
+        )
+        folder_font = folder_header.font()
+        folder_font.setBold(True)
+        folder_header.setFont(folder_font)
+        folder_header.setBackground(
+            QtGui.QBrush(QtGui.QColor(255, 248, 225))
+        )
+        folder_header.setForeground(
+            QtGui.QBrush(QtGui.QColor(200, 150, 0))
+        )
+        folder_header.setSizeHint(QtCore.QSize(0, 28))
+        self.notes_list.addItem(folder_header)
+
+        for log in logs:
+            size_str = self._format_file_size(log.size)
+            display_text = f"  \U0001f4c4 {log.path}\n  {size_str}"
+
+            item = QtWidgets.QListWidgetItem(display_text)
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            item.setData(
+                QtCore.Qt.ItemDataRole.UserRole,
+                f"{SERVER_LOG_PREFIX}{log.path}",
+            )
+            item.setToolTip(log.path)
+            item.setSizeHint(QtCore.QSize(0, 40))
+            item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignLeft
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+            self.notes_list.addItem(item)
+
+    def _set_server_log_editor(self, log_path: str) -> None:
+        """通过 API 以只读模式打开服务器日志文件。"""
+        self._ask_ai_mode = False
+        self._current_ai_session_id = None
+        self._current_external_file = None
+        self.state.current_note_id = None
+        try:
+            data = self.api.get_log(log_path)
+            content = data.get("content", "")
+        except Exception as e:
+            self._show_error(f"\u83b7\u53d6\u65e5\u5fd7\u6587\u4ef6\u5931\u8d25\uff1a{e}")
+            return
+        file_name = PurePosixPath(log_path).name
+        mode = self._mode_from_filename(file_name)
+        self.content_edit.setPlainText(content)
+        self.content_edit.setReadOnly(True)
+        self.title_edit.blockSignals(True)
+        self.content_edit.blockSignals(True)
+        self.title_edit.setText(f"\U0001f4cb {file_name} (\u53ea\u8bfb)")
+        self.title_edit.blockSignals(False)
+        self.content_edit.blockSignals(False)
+        self._set_right_panel_mode("external")
+        self._set_ai_controls_visible(False)
+        self.btn_ai_ask.setEnabled(False)
+        self.btn_save.setEnabled(False)
+        self.btn_delete.setEnabled(False)
+        self.btn_favorite.setEnabled(False)
+        self._auto_set_highlight_mode(file_name)
+        self.state.dirty = False
+        self._update_title()
+
     def _save_external_file(
         self,
         reason: str | None = None,
@@ -2213,7 +2418,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     def _rename_note_from_item(self, item) -> None:
         item_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole) if isinstance(item, QtWidgets.QTreeWidgetItem) else item.data(QtCore.Qt.ItemDataRole.UserRole)
-        if item_id == ASK_AI_ITEM_ID or (isinstance(item_id, str) and (item_id.startswith("__folder__:") or item_id.startswith("__empty__"))):
+        if item_id == ASK_AI_ITEM_ID or (isinstance(item_id, str) and (
+            item_id.startswith("__folder__:") or item_id.startswith("__empty__")
+            or item_id.startswith(SERVER_LOG_PREFIX) or item_id == SERVER_LOG_FOLDER_ID
+            or item_id.startswith(SERVER_LOG_SUB_PREFIX)
+        )):
             return
         note_id = int(item_id)
         try:

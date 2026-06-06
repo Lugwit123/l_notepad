@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import file_store
-from .api_client import ApiError, NoteDto
+from .api_client import ApiError, LogDto, NoteDto
 from .folder_favorites_hotkey import FolderFavoritesHotkeyService
 from .ui import MainWindow
 
@@ -430,6 +430,101 @@ class LocalNotepadApi:
             created_at=note.created_at,
             updated_at=note.updated_at,
         )
+
+    # ---- Server Log API (local filesystem / remote server) ----
+
+    @staticmethod
+    def _log_server_url() -> str:
+        """Return remote log server URL. Default: http://121.196.144.88:8765"""
+        import os
+        server = os.environ.get("L_NOTEPAD_LOG_SERVER", "http://121.196.144.88:8765").strip()
+        if not server.startswith(("http://", "https://")):
+            port = os.environ.get("L_NOTEPAD_PORT", "8765")
+            server = f"http://{server}:{port}"
+        return server.rstrip("/")
+
+    @staticmethod
+    def _log_dir() -> Path:
+        import os
+        return Path(os.environ.get("L_NOTEPAD_LOG_DIR", r"D:\Temp\Log"))
+
+    def list_logs(self, max_size: int = 2 * 1024 * 1024) -> list[LogDto]:
+        """List server log files. Uses remote server if configured, otherwise local filesystem."""
+        remote = self._log_server_url()
+        if remote:
+            return self._list_logs_remote(remote)
+        return self._list_logs_local(max_size)
+
+    def _list_logs_remote(self, base_url: str) -> list[LogDto]:
+        """Fetch log list from remote server via HTTP."""
+        import json
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(f"{base_url}/api/logs")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return [LogDto(**x) for x in (data or [])]
+        except Exception as e:
+            raise ApiError(f"Remote log list failed: {e}") from e
+
+    def _list_logs_local(self, max_size: int = 2 * 1024 * 1024) -> list[LogDto]:
+        """List server log files from local filesystem."""
+        from datetime import datetime as _dt
+        log_root = self._log_dir()
+        if not log_root.exists() or not log_root.is_dir():
+            return []
+        result: list[LogDto] = []
+        for p in sorted(log_root.rglob("*")):
+            if not p.is_file():
+                continue
+            if p.name.startswith("."):
+                continue
+            try:
+                st = p.stat()
+                if st.st_size > max_size:
+                    continue
+            except OSError:
+                continue
+            rel = p.relative_to(log_root).as_posix()
+            result.append(LogDto(
+                path=rel,
+                size=st.st_size,
+                mtime=_dt.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            ))
+        return result
+
+    def get_log(self, log_path: str) -> dict[str, str]:
+        """Get server log content. Uses remote server if configured, otherwise local filesystem."""
+        remote = self._log_server_url()
+        if remote:
+            return self._get_log_remote(remote, log_path)
+        return self._get_log_local(log_path)
+
+    def _get_log_remote(self, base_url: str, log_path: str) -> dict[str, str]:
+        """Fetch log content from remote server via HTTP."""
+        import json
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(f"{base_url}/api/logs/{log_path}")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return data
+        except Exception as e:
+            raise ApiError(f"Remote get log failed: {e}") from e
+
+    def _get_log_local(self, log_path: str) -> dict[str, str]:
+        """Get server log content from local filesystem."""
+        import os
+        log_root = self._log_dir()
+        target = (log_root / log_path.replace("/", os.sep)).resolve()
+        if log_root.resolve() not in target.parents and target != log_root.resolve():
+            raise ApiError(f"Access denied: {log_path}")
+        if not target.exists() or not target.is_file():
+            raise ApiError(f"Log file not found: {log_path}")
+        content = target.read_text(encoding="utf-8", errors="replace")
+        return {"path": log_path, "content": content}
 
 
 def _acquire_single_instance_lock(app: QtWidgets.QApplication) -> QtCore.QLockFile | None:

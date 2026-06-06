@@ -54,6 +54,15 @@ class NoteUpdate(BaseModel):
     content: str = Field(default="")
 
 
+class LogEntryOut(BaseModel):
+    path: str
+    size: int
+    mtime: str
+
+
+SERVER_LOG_DIR = Path(os.environ.get("L_NOTEPAD_LOG_DIR", r"D:\Temp\Log"))
+
+
 class NoteOut(BaseModel):
     path: str
     title: str
@@ -93,6 +102,9 @@ def create_app(db_path: Path) -> FastAPI:
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
         resp = await call_next(request)
+        # Skip CSP for auto-generated API docs (Swagger UI / ReDoc load CDN resources).
+        if request.url.path in ("/docs", "/redoc"):
+            return resp
         # Minimal CSP: keep scripts local (but allow inline scripts in existing templates).
         resp.headers.setdefault(
             "Content-Security-Policy",
@@ -152,6 +164,51 @@ def create_app(db_path: Path) -> FastAPI:
         if not ok:
             raise HTTPException(status_code=404, detail="Note not found")
         return {"ok": True}
+
+    # ---- Server Log API ----
+
+    @app.get("/api/logs", response_model=list[LogEntryOut])
+    def list_logs(max_size: int = 2 * 1024 * 1024) -> list[LogEntryOut]:
+        """List server log files from SERVER_LOG_DIR."""
+        log_root = SERVER_LOG_DIR
+        if not log_root.exists() or not log_root.is_dir():
+            return []
+        from datetime import datetime as _dt
+        result: list[LogEntryOut] = []
+        for p in sorted(log_root.rglob("*")):
+            if not p.is_file():
+                continue
+            if p.name.startswith("."):
+                continue
+            try:
+                st = p.stat()
+                if st.st_size > max_size:
+                    continue
+            except OSError:
+                continue
+            rel = p.relative_to(log_root).as_posix()
+            result.append(LogEntryOut(
+                path=rel,
+                size=st.st_size,
+                mtime=_dt.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            ))
+        return result
+
+    @app.get("/api/logs/{log_path:path}")
+    def get_log(log_path: str) -> dict[str, Any]:
+        """Get the content of a specific server log file."""
+        log_root = SERVER_LOG_DIR
+        target = (log_root / log_path.replace("/", os.sep)).resolve()
+        # Security: ensure the path is within log_root
+        if log_root.resolve() not in target.parents and target != log_root.resolve():
+            raise HTTPException(status_code=403, detail="Access denied")
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="Log file not found")
+        try:
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Read failed: {e}")
+        return {"path": log_path, "content": content}
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
