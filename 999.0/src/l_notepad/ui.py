@@ -14,6 +14,7 @@ import traceback
 import urllib.error
 import urllib.request
 import uuid
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -602,6 +603,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._ask_ai_mode = False
         self._external_files: list[str] = []
         self._current_external_file: str | None = None
+        self._current_server_log_path: str | None = None
         self._ai_sessions: dict[str, AiSession] = {}
         self._current_ai_session_id: str | None = None
         self._ai_request_seq = 0
@@ -755,6 +757,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 self.notes_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
             self.notes_list.itemSelectionChanged.connect(self._on_selection_changed)
             self.notes_list.itemDoubleClicked.connect(self._rename_note_from_item)
+            self.notes_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            self.notes_list.customContextMenuRequested.connect(self._on_notes_list_context_menu)
             self.notes_list.model().rowsMoved.connect(self._on_notes_rows_moved)
 
         self.search_edit.textChanged.connect(self._apply_filter)
@@ -962,8 +966,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._show_error(str(e))
             return
 
-        current_id = None if self._current_external_file else self.state.current_note_id
-        if current_id is None and not self._current_external_file:
+        current_id = None if self._current_external_file or self._current_server_log_path else self.state.current_note_id
+        if current_id is None and not self._current_external_file and not self._current_server_log_path:
             current_id = self._last_open_note_id
         query = self.search_edit.text().strip()
         notes_sorted = self._sort_notes(notes)
@@ -983,6 +987,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             selected = self._select_external_file(self._current_external_file)
             if not selected:
                 self.append_log(f"刷新列表后未找到外部文件: {self._current_external_file}")
+        elif self._current_server_log_path:
+            # 服务器日志保持当前编辑状态，无需重新选择
+            pass
         elif self._notes_count() > 1:
             self._select_first_note_item()
         else:
@@ -1016,6 +1023,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         tree.setStyle(self._note_tree_style)
         tree.itemSelectionChanged.connect(self._on_selection_changed)
         tree.itemDoubleClicked.connect(self._rename_note_from_item)
+        tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        tree.customContextMenuRequested.connect(self._on_notes_tree_context_menu)
         tree.itemExpanded.connect(self._on_folder_expanded_or_collapsed)
         tree.itemCollapsed.connect(self._on_folder_expanded_or_collapsed)
 
@@ -1089,11 +1098,17 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if not hasattr(self, "_tree_folder_expanded_state"):
             self._tree_folder_expanded_state = {}
 
+        def _is_tracked_folder(role: str) -> bool:
+            return (
+                role.startswith("__folder__:")
+                or role == ASK_AI_ITEM_ID
+                or role == SERVER_LOG_FOLDER_ID
+                or role.startswith(SERVER_LOG_SUB_PREFIX)
+            )
+
         def _collect_expand_walk(node: QtWidgets.QTreeWidgetItem) -> None:
             role = node.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
-            if isinstance(role, str) and (
-                role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
-            ):
+            if isinstance(role, str) and _is_tracked_folder(role):
                 self._tree_folder_expanded_state[role] = node.isExpanded()
             for i in range(node.childCount()):
                 _collect_expand_walk(node.child(i))
@@ -1147,9 +1162,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         # ② 按持久化的展开状态恢复（未记录的文件夹默认展开；ASK_AI 默认折叠由外部控制）
         def _restore_expand_walk(node: QtWidgets.QTreeWidgetItem) -> None:
             role = node.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
-            if isinstance(role, str) and (
-                role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
-            ):
+            if isinstance(role, str) and _is_tracked_folder(role):
                 expanded = self._tree_folder_expanded_state.get(role, True)
                 node.setExpanded(bool(expanded))
                 # 同步图标（▾/▸）和子项计数
@@ -1178,6 +1191,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             role = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
             if isinstance(role, str) and (
                 role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+                or role == SERVER_LOG_FOLDER_ID
+                or role.startswith(SERVER_LOG_SUB_PREFIX)
             ):
                 self._update_folder_icon(item)
             for i in range(item.childCount()):
@@ -1194,10 +1209,61 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         role = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
         if isinstance(role, str) and (
             role.startswith("__folder__:") or role == ASK_AI_ITEM_ID
+            or role == SERVER_LOG_FOLDER_ID
+            or role.startswith(SERVER_LOG_SUB_PREFIX)
         ):
             if not hasattr(self, "_tree_folder_expanded_state"):
                 self._tree_folder_expanded_state = {}
             self._tree_folder_expanded_state[role] = item.isExpanded()
+
+    def _get_log_server_url(self) -> str:
+        """获取日志服务器基础 URL。"""
+        api = self.api
+        # NotepadApi 有 base_url 属性
+        if hasattr(api, "base_url"):
+            return api.base_url
+        # LocalNotepadApi 有 _log_server_url 静态方法
+        if hasattr(api, "_log_server_url"):
+            return api._log_server_url()
+        return ""
+
+    def _on_notes_tree_context_menu(self, pos: QtCore.QPoint) -> None:
+        """notes_tree 右键菜单"""
+        tree = self.notes_tree
+        if tree is None:
+            return
+        item = tree.itemAt(pos)
+        if item is None:
+            return
+        item_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""
+        if not isinstance(item_id, str) or not item_id.startswith(SERVER_LOG_PREFIX):
+            return
+        log_path = item_id[len(SERVER_LOG_PREFIX):]
+        self._show_log_context_menu(tree.viewport().mapToGlobal(pos), log_path)
+
+    def _on_notes_list_context_menu(self, pos: QtCore.QPoint) -> None:
+        """notes_list 右键菜单"""
+        lst = self.notes_list
+        if lst is None:
+            return
+        item = lst.itemAt(pos)
+        if item is None:
+            return
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole) or ""
+        if not isinstance(item_id, str) or not item_id.startswith(SERVER_LOG_PREFIX):
+            return
+        log_path = item_id[len(SERVER_LOG_PREFIX):]
+        self._show_log_context_menu(lst.viewport().mapToGlobal(pos), log_path)
+
+    def _show_log_context_menu(self, global_pos: QtCore.QPoint, log_path: str) -> None:
+        """显示服务器日志项的右键菜单"""
+        menu = QtWidgets.QMenu(self)
+        base_url = self._get_log_server_url()
+        if base_url:
+            log_url = f"{base_url}/api/logs/{log_path}"
+            action_web = menu.addAction("使用网页访问该日志")
+            action_web.triggered.connect(lambda: webbrowser.open(log_url))
+        menu.exec(global_pos)
 
     def _ensure_tree_folder_item(self, tree: QtWidgets.QTreeWidget, folder_path: str) -> QtWidgets.QTreeWidgetItem:
         parts = [p for p in folder_path.replace("\\", "/").split("/") if p]
@@ -1572,6 +1638,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if self._current_external_file:
             self._save_external_file()
             return
+        if self._current_server_log_path:
+            self._save_server_log()
+            return
         title = self.title_edit.text().strip() or "未命名"
         content = self._get_content_text()
         try:
@@ -1693,6 +1762,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             return
         if self._current_external_file:
             self._save_external_file(reason, notify_tray=notify_tray, detail_ui=detail_ui)
+            return
+        if self._current_server_log_path:
+            self._save_server_log(reason)
             return
         if self.state.current_note_id is None:
             return
@@ -2103,6 +2175,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._ask_ai_mode = False
         self._current_ai_session_id = None
         self._current_external_file = str(path)
+        self._current_server_log_path = None
         self.state.current_note_id = None
         if not self.content_edit.load_text_file_cached(path, mode=mode):
             self._show_error(f"打开外部文件失败：{file_path}")
@@ -2292,10 +2365,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self.notes_list.addItem(item)
 
     def _set_server_log_editor(self, log_path: str) -> None:
-        """通过 API 以只读模式打开服务器日志文件。"""
+        """通过 API 打开服务器日志文件（可编辑）。"""
         self._ask_ai_mode = False
         self._current_ai_session_id = None
         self._current_external_file = None
+        self._current_server_log_path = log_path
         self.state.current_note_id = None
         try:
             data = self.api.get_log(log_path)
@@ -2307,21 +2381,51 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         file_name = PurePosixPath(log_path).name
         mode = self._mode_from_filename(file_name)
         self.content_edit.setPlainText(content)
-        self.content_edit.setReadOnly(True)
+        self.content_edit.setReadOnly(False)
         self.title_edit.blockSignals(True)
         self.content_edit.blockSignals(True)
-        self.title_edit.setText(f"\U0001f4cb {file_name} (\u53ea\u8bfb)")
+        self.title_edit.setText(f"\U0001f4cb {file_name}")
         self.title_edit.blockSignals(False)
         self.content_edit.blockSignals(False)
         self._set_right_panel_mode("external")
         self._set_ai_controls_visible(False)
         self.btn_ai_ask.setEnabled(False)
-        self.btn_save.setEnabled(False)
+        self.btn_save.setEnabled(True)
         self.btn_delete.setEnabled(False)
         self.btn_favorite.setEnabled(False)
         self._auto_set_highlight_mode(file_name)
         self.state.dirty = False
         self._update_title()
+        # 状态栏显示日志路径
+        base_url = self._get_log_server_url()
+        self.status.showMessage(f"日志: {base_url}/api/logs/{log_path}" if base_url else f"日志: {log_path}", 0)
+
+    def _save_server_log(
+        self,
+        reason: str | None = None,
+    ) -> None:
+        """保存服务器日志文件到服务器。"""
+        if not self._current_server_log_path:
+            return
+        log_path = self._current_server_log_path
+        content = self._get_content_text()
+        file_name = PurePosixPath(log_path).name
+        try:
+            self.api.update_log(log_path, content)
+        except Exception as exc:
+            print(f"[l_notepad] ERROR: 保存日志文件失败: {exc}")
+            if reason:
+                self.status.showMessage(f"保存日志失败：{exc}", 5000)
+                self.append_log(f"保存日志失败：{exc}")
+            else:
+                self._show_error(f"保存日志文件失败：{exc}")
+            return
+        self.state.dirty = False
+        self._update_title()
+        if reason:
+            self.status.showMessage(f"{reason} 已保存日志 {file_name}", 2500)
+        else:
+            self.status.showMessage(f"已保存日志 {file_name}", 2500)
 
     def _save_external_file(
         self,
@@ -2484,6 +2588,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         assert self.btn_new is not None
         assert self.ai_tabs is not None
         self._ask_ai_mode = True
+        self._current_server_log_path = None
         self.state.current_note_id = None
         self.state.dirty = False
 
@@ -2991,6 +3096,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._ask_ai_mode = False
         self._current_ai_session_id = None
         self._current_external_file = None
+        self._current_server_log_path = None
         self._set_right_panel_mode("empty" if note is None else "note")
         if self._qt_is_valid(getattr(self, "ai_answer_edit", None)):
             self.ai_answer_edit.clear()

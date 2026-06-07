@@ -210,6 +210,20 @@ def create_app(db_path: Path) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Read failed: {e}")
         return {"path": log_path, "content": content}
 
+    @app.put("/api/logs/{log_path:path}")
+    def update_log(log_path: str, payload: NoteUpdate) -> dict[str, Any]:
+        """Update (overwrite) a server log file."""
+        log_root = SERVER_LOG_DIR
+        target = (log_root / log_path.replace("/", os.sep)).resolve()
+        if log_root.resolve() not in target.parents and target != log_root.resolve():
+            raise HTTPException(status_code=403, detail="Access denied")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(payload.content, encoding="utf-8")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+        return {"ok": True}
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         notes = file_store.list_notes(notes_root, limit=200)

@@ -524,6 +524,43 @@ class LocalNotepadApi:
         content = target.read_text(encoding="utf-8", errors="replace")
         return {"path": log_path, "content": content}
 
+    def update_log(self, log_path: str, content: str) -> None:
+        """Update (overwrite) a server log file via remote or local."""
+        remote_url = self._log_server_url()
+        if remote_url:
+            self._update_log_remote(remote_url, log_path, content)
+        else:
+            self._update_log_local(log_path, content)
+
+    def _update_log_remote(self, base_url: str, log_path: str, content: str) -> None:
+        """Update log on remote server via HTTP PUT."""
+        import json
+        import urllib.request
+        import urllib.error
+        try:
+            payload = json.dumps({"title": "", "content": content}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base_url}/api/logs/{log_path}",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="PUT",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
+        except Exception as e:
+            print(f"[l_notepad] ERROR: Remote update log failed: {e}")
+            raise ApiError(f"Remote update log failed: {e}") from e
+
+    def _update_log_local(self, log_path: str, content: str) -> None:
+        """Update log on local filesystem."""
+        import os
+        log_root = self._log_dir()
+        target = (log_root / log_path.replace("/", os.sep)).resolve()
+        if log_root.resolve() not in target.parents and target != log_root.resolve():
+            raise ApiError(f"Access denied: {log_path}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
 
 def _acquire_single_instance_lock(app: QtWidgets.QApplication) -> QtCore.QLockFile | None:
     """PC 模式单实例：使用 QLockFile 避免多开。"""

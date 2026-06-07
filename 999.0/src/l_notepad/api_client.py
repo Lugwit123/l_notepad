@@ -72,6 +72,10 @@ class NotepadApi:
         """Fetch server log content. Returns {'path': ..., 'content': ...}."""
         return self._get(f"/api/logs/{log_path}")
 
+    def update_log(self, log_path: str, content: str) -> None:
+        """Update (overwrite) a server log file."""
+        self._put(f"/api/logs/{log_path}", {"title": "", "content": content})
+
     def _get(self, path: str) -> Any:
         return self._request("GET", path, None)
 
