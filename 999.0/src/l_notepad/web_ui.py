@@ -6,8 +6,10 @@ import webbrowser
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from l_qt_wgt_lib.qframelesswindow.L_FramelessMainWindow import L_FramelessMainWindow
 
-class WebNotepadWindow(QtWidgets.QMainWindow):
+
+class WebNotepadWindow(L_FramelessMainWindow):
     def __init__(self, url: str) -> None:
         super().__init__()
         self.url = url
@@ -91,6 +93,7 @@ class WebNotepadWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(w)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(10)
+        self.setCentralWidget(w)
 
         label = QtWidgets.QLabel(
             "当前环境缺少 QtWebEngine，无法内嵌网页。\n"

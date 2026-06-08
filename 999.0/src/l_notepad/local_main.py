@@ -449,9 +449,14 @@ class LocalNotepadApi:
         return Path(os.environ.get("L_NOTEPAD_LOG_DIR", r"D:\Temp\Log"))
 
     def list_logs(self, max_size: int = 2 * 1024 * 1024) -> list[LogDto]:
-        """List server log files from remote server."""
+        """List server log files from remote server, fallback to local on failure."""
         remote_url = self._log_server_url()
-        return self._list_logs_remote(remote_url)
+        try:
+            return self._list_logs_remote(remote_url)
+        except Exception as e:
+            # 远程获取失败时降级到本地
+            print(f"[l_notepad] WARNING: Remote log list failed ({e}), falling back to local")
+            return self._list_logs_local(max_size)
 
     def _list_logs_remote(self, base_url: str) -> list[LogDto]:
         """Fetch log list from remote server via HTTP."""
@@ -460,7 +465,7 @@ class LocalNotepadApi:
         import urllib.error
         try:
             req = urllib.request.Request(f"{base_url}/api/logs")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:  # 减少超时时间到 3 秒
                 data = json.loads(resp.read().decode("utf-8"))
             return [LogDto(**x) for x in (data or [])]
         except Exception as e:
@@ -505,7 +510,7 @@ class LocalNotepadApi:
         import urllib.error
         try:
             req = urllib.request.Request(f"{base_url}/api/logs/{log_path}")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=5) as resp:  # 获取日志内容，超时 5 秒
                 data = json.loads(resp.read().decode("utf-8"))
             return data
         except Exception as e:
@@ -545,7 +550,7 @@ class LocalNotepadApi:
                 headers={"Content-Type": "application/json"},
                 method="PUT",
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=5) as resp:  # 更新日志，超时 5 秒
                 pass
         except Exception as e:
             print(f"[l_notepad] ERROR: Remote update log failed: {e}")

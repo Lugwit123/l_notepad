@@ -178,6 +178,8 @@ def replace_text_edit_with_code_editor(
     new_editor = CodeEditorWidget(parent)
     new_editor.setObjectName(obj_name)
     _apply_text_edit_appearance(new_editor, old_widget)
+    # 搜索栏向上偏移一个自身高度，避免遮挡内容
+    new_editor.set_search_bar_y_offset(-new_editor.search_bar_height())
     
     if layout is not None:
         # 查找旧 widget 在布局中的索引和属性
@@ -218,6 +220,8 @@ def create_code_editor_widget(
     editor.clear()
     if template is not None:
         _apply_text_edit_appearance(editor, template)
+    # 搜索栏向上偏移一个自身高度，避免遮挡内容
+    editor.set_search_bar_y_offset(-editor.search_bar_height())
     return editor
 
 
@@ -477,12 +481,18 @@ class RightPanel(QtWidgets.QWidget):
             '在这里输入问题，然后点击"问AI"。\n\n'
             "支持多会话与上下文记忆。\n支持模型：硅基流动 / 智谱 Zhipu。"
         )
+        self._ai_template_content_edit.set_search_bar_y_offset(
+            -self._ai_template_content_edit.search_bar_height()
+        )
         tpl.addWidget(self._ai_template_content_edit)
 
         self._ai_template_answer_edit = CodeEditorWidget(self._ai_tab_template_widget)
         self._ai_template_answer_edit.setObjectName("AiAnswerViewer")
         self._ai_template_answer_edit.setReadOnly(True)
         self._ai_template_answer_edit.setPlaceholderText("AI 回答会显示在这里（支持多会话上下文）")
+        self._ai_template_answer_edit.set_search_bar_y_offset(
+            -self._ai_template_answer_edit.search_bar_height()
+        )
         tpl.addWidget(self._ai_template_answer_edit)
 
         self.ai_tabs.addTab(self._ai_tab_template_widget, "Template")
@@ -500,6 +510,8 @@ class RightPanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
+        # 搜索栏向上偏移一个自身高度，避免遮挡内容
+        self.content_edit.set_search_bar_y_offset(-self.content_edit.search_bar_height())
         root.addWidget(self.content_edit, 1)
 
         # ---- ai_answer_edit（旧版 AI 回答区，默认隐藏）
@@ -512,6 +524,7 @@ class RightPanel(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
+        self.ai_answer_edit.set_search_bar_y_offset(-self.ai_answer_edit.search_bar_height())
         root.addWidget(self.ai_answer_edit, 1)
 
         # ---- 操作按钮行
@@ -2200,14 +2213,58 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     # ===== 服务器日志文件浏览（通过 API 获取） =====
 
     def _fetch_server_logs(self) -> tuple[list[LogDto], str | None]:
-        """通过 API 获取服务器日志列表。返回 (logs, error_msg)。"""
+        """通过 API 获取服务器日志列表。返回 (logs, error_msg)。
+        
+        注意：此方法可在后台线程中调用，不应直接操作 UI。
+        """
         try:
             return self.api.list_logs(), None
         except Exception as e:
             msg = f"获取服务器日志列表失败: {e}"
             print(f"[l_notepad] ERROR: {msg}")
-            self.append_log(msg)
+            # 注意：不在这里调用 self.append_log()，因为可能在后台线程
             return [], msg
+    
+    def _fetch_server_logs_async(self, query: str = "") -> None:
+        """异步获取服务器日志列表并更新 UI。"""
+        from PySide6.QtCore import QThread
+        
+        # 在后台线程中获取日志
+        def _worker():
+            logs, error_msg = self._fetch_server_logs()
+            if query and logs:
+                logs = [log for log in logs if query.lower() in log.path.lower()]
+            return logs, error_msg
+        
+        # 使用 QThread 运行
+        thread = QThread()
+        worker = type('_Worker', (), {'run': _worker})()
+        worker.moveToThread(thread)
+        
+        def _on_finished():
+            logs, error_msg = _worker()
+            thread.quit()
+            thread.wait()
+            # 在主线程中更新 UI
+            self._update_server_log_list(logs, error_msg)
+        
+        thread.started.connect(lambda: None)  # 占位
+        thread.finished.connect(_on_finished)
+        
+        # 简单方式：直接在后台线程执行
+        import threading
+        def _run_in_background():
+            logs, error_msg = _worker()
+            # 使用 QMetaObject.invokeMethod 回到主线程更新 UI
+            QtCore.QMetaObject.invokeMethod(
+                self,
+                "_update_server_log_list",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(list, logs),
+                QtCore.Q_ARG(str, error_msg or ""),
+            )
+        
+        threading.Thread(target=_run_in_background, daemon=True).start()
 
     def _add_server_log_files_to_tree(
         self, tree: QtWidgets.QTreeWidget, query: str = ""
@@ -2310,12 +2367,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             sub_item.setExpanded(True)
 
     def _add_server_log_files_to_list(self, query: str = "") -> None:
-        """在文件列表中添加服务器日志虚拟文件夹。"""
-        logs, error_msg = self._fetch_server_logs()
-        if query and logs:
-            logs = [log for log in logs if query.lower() in log.path.lower()]
-
-        # 始终显示文件夹头
+        """在文件列表中添加服务器日志虚拟文件夹（异步加载）。"""
+        # 先显示占位符
         folder_header = QtWidgets.QListWidgetItem(
             "\U0001f4cb \u670d\u52a1\u5668\u65e5\u5fd7"
         )
@@ -2334,7 +2387,29 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         )
         folder_header.setSizeHint(QtCore.QSize(0, 28))
         self.notes_list.addItem(folder_header)
-
+        
+        # 显示加载中的提示
+        loading_item = QtWidgets.QListWidgetItem("  \U0001f504 \u6b63\u5728\u52a0\u8f7d\u670d\u52a1\u5668\u65e5\u5fd7\u5217\u8868...")
+        loading_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+        loading_item.setData(QtCore.Qt.ItemDataRole.UserRole, "__server_log_loading__")
+        loading_item.setForeground(QtGui.QBrush(QtGui.QColor("#888888")))
+        loading_item.setSizeHint(QtCore.QSize(0, 28))
+        self._loading_item = loading_item  # 保存引用以便后续移除
+        self.notes_list.addItem(loading_item)
+        
+        # 异步获取日志列表
+        self._fetch_server_logs_async(query=query)
+    
+    @QtCore.Slot(list, str)
+    def _update_server_log_list(self, logs: list, error_msg: str) -> None:
+        """异步更新服务器日志列表 UI（在主线程中调用）。"""
+        # 移除加载中的提示
+        if hasattr(self, '_loading_item') and self._loading_item:
+            idx = self.notes_list.row(self._loading_item)
+            if idx >= 0:
+                self.notes_list.takeItem(idx)
+            self._loading_item = None
+        
         if error_msg:
             err_item = QtWidgets.QListWidgetItem(f"  \u26a0 {error_msg}")
             err_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
@@ -2343,11 +2418,20 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             err_item.setSizeHint(QtCore.QSize(0, 28))
             self.notes_list.addItem(err_item)
             return
-
+        
+        if not logs:
+            # 显示空提示
+            empty_item = QtWidgets.QListWidgetItem("  \U0001f4c2 \u672a\u627e\u5230\u670d\u52a1\u5668\u65e5\u5fd7")
+            empty_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            empty_item.setForeground(QtGui.QBrush(QtGui.QColor("#888888")))
+            empty_item.setSizeHint(QtCore.QSize(0, 28))
+            self.notes_list.addItem(empty_item)
+            return
+        
         for log in logs:
             size_str = self._format_file_size(log.size)
             display_text = f"  \U0001f4c4 {log.path}\n  {size_str}"
-
+            
             item = QtWidgets.QListWidgetItem(display_text)
             font = item.font()
             font.setBold(True)

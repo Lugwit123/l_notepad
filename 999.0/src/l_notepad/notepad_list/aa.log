@@ -1,25 +1,30 @@
-过了十多分钟监控才恢复
+D:\Temp\Log\j_disc_backup_ui\07_shijileilu_20260608.md
+资产缓存存在为啥muse大小列没填充,然后
+D:\TD_Depot\Wuzu_dev\anim_upload_muse_tool\run_j_disc_backup_ui_07_实机内录.bat
+中的
+启动时设置的set "BAT_UPLOAD_DIR=07_实机内录"
+也不是这个目录
 
-[2026-06-05 18:13:43] {WARNING}
-[arg0] "[7z元数据][缓存写回内存]"
-[arg1] ["资产ID", "6a1065d2d19ad343aabf2433"]
-[arg2] ["内部总大小", 12040546504]
-[arg3] ["分卷数", 4]
-[arg4] ["包体总大小", 5347706230]
-[arg5] ["压缩包数", 2]   ----code_context : lprint(
-            "[7z元数据][缓存写回内存]",
-            ("资产ID", getattr(asset, "asset_id", "")),
-            ("内部总大小", int(archive_meta["summary"]["inner_total_size"])),
-            ("分卷数", len(volume_parts)),
-            ("包体总大小", int(package_total_size)),
-            ("压缩包数", len(metadata_archives)),
-        )
-File: c:\users\wb.fengqingqing\packages\anim_upload_muse_tool\999.0.0\src\anim_upload_muse_tool\j_disc_backtomuse\backup_ui_helper.py:
-1460, -fn: _ensure_archive_metadata_from_download_cache, 打印次数: 4/4
 
-2026-06-05 18:23:56,243 - pytracemp.usualFunc_helper.stall_monitor - INFO - [MainThread] 栈恢复变化
-2026-06-05 18:24:26,247 - pytracemp.usualFunc_helper.stall_monitor - WARNING - [MainThread] 检测到卡顿! 持续 20.0s, 位置: subprocess.p
-y:_communicate:1626→subprocess.py:communicate:1209→subprocess.py:run
-2026-06-05 18:25:01,253 - pytracemp.usualFunc_helper.stall_monitor - INFO - [MainThread] 栈恢复变化
-2026-06-05 18:25:31,257 - pytracemp.usualFunc_helper.stall_monitor - WARNING - [MainThread] 检测到卡顿! 持续 20.0s, 位置: subprocess.p
-y:_communicate:1626→subprocess.py:communicate:1209→subprocess.py:run
+解压后文件md5数据已存在并且匹配J盘原始文件,还会重新计算MD5么
+9. J:/H74/00_产品相关/中期评审/素材/策划给的  (asset_id: 695253043aa3f30f81f02a3d)
+   原因: 已有附件缓存；MD5已全部计算(38个文件)，重新获取以刷新；分卷已就绪，需计算解压后MD5
+   原始文件: J:\H74\00_产品相关\中期评审\素材\策划给的
+   本地文件: 19个 / 19.4GB
+   Muse附件: 42个 / 45.9GB
+   包含分卷: battle1 太磨叽.mp4(2卷), 侦察+元素.mp4(2卷)
+   MD5状态: 38/38 已计算
+   附件详情:
+     1. battle1 太磨叽_compress.mp4.001 (2.0GB) - 50c2d492... [分卷]
+     2. battle1 太磨叽_compress.mp4.002 (1.2GB) - 5d8374ab... [分卷]
+     3. battle2 最后有音效bug.mp4 (2.2GB) - b0e6d37b...
+     4. battle3 没打完.mp4 (818.8MB) - 9f3777d0...
+     5. Battle4 没夹住.mp4 (1.4GB) - 97d43ecf...
+     6. battle5 1分35秒夹住了可是在放歌.mp4 (1.1GB) - 06595601...
+     7. Game_x64h 2021-01-13 20-19-36-987.mp4 (1.5GB) - 9a2ac394...
+     8. Game_x64h 2021-01-13 20-20-13-761.jpg (1.1MB) - 3c1c2702...
+     9. Game_x64h 2021-01-13 20-21-07-952.mp4 (617.7MB) - af963d6b...
+     10. Game_x64h 2021-01-13 20-24-55-472.mp4 (256.9MB) - d7ec4677...
+     ... 还有 32 个附件未显示
+
+
