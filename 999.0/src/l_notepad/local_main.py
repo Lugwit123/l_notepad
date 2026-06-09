@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from l_qt_wgt_lib.qframelesswindow import L_FramelessMainWindow
 
 from . import file_store
 from .api_client import ApiError, LogDto, NoteDto
 from .folder_favorites_hotkey import FolderFavoritesHotkeyService
-from .ui import MainWindow
+from .ui import MainWindow as NotepadContentWindow
 
 
 DOUBLE_CTRL_MIN_GAP_SEC = 0.05
@@ -251,7 +252,7 @@ class DoubleKeyWatcher:
 
 def _setup_tray_icon(
     app: QtWidgets.QApplication,
-    win: MainWindow,
+    win: QtWidgets.QMainWindow,
     icon: QtGui.QIcon,
 ) -> QtWidgets.QSystemTrayIcon | None:
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
@@ -277,11 +278,15 @@ def _setup_tray_icon(
         setattr(win, "_allow_close", True)
         win.close()
         app.quit()
+        # 强制退出，确保 app.quit() 起作用
+        QtCore.QTimer.singleShot(100, lambda: sys.exit(0))
 
     act_show.triggered.connect(_show_window)
     act_hide.triggered.connect(_hide_window)
     act_quit.triggered.connect(_quit_app)
 
+    if hasattr(win, "set_tray_icon"):
+        win.set_tray_icon(tray)
     tray.setContextMenu(menu)
 
     def _on_activated(reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
@@ -565,6 +570,79 @@ class LocalNotepadApi:
             raise ApiError(f"Access denied: {log_path}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+
+
+class MainWindow(L_FramelessMainWindow):
+    """本地模式无边框主窗口，使用 L_FramelessMainWindow 作为标题栏外壳。"""
+
+    def __init__(
+        self,
+        api: LocalNotepadApi,
+        restart_callback=None,
+        hotkey_interval_callback=None,
+        hotkey_key_callback=None,
+    ) -> None:
+        super().__init__(vertical_threshold=760)
+        self.setWindowTitle("L Notepad")
+        self.resize(980, 640)
+        self.setMinimumSize(720, 480)
+
+        self.content_window = NotepadContentWindow(
+            api,
+            restart_callback=restart_callback,
+            hotkey_interval_callback=hotkey_interval_callback,
+            hotkey_key_callback=hotkey_key_callback,
+        )
+        self.content_window.setWindowFlags(QtCore.Qt.WindowType.Widget)
+        self.content_window.setParent(self)
+        self.content_window.setContentsMargins(0, 0, 0, 0)
+        self.content_window.show()
+        self.setContentWidget(self.content_window)
+
+        self._sync_title_bar_from_content()
+
+    def _sync_title_bar_from_content(self) -> None:
+        icon = self.content_window.windowIcon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
+        title_label = QtWidgets.QLabel("L Notepad")
+        title_label.setStyleSheet("color: #E8EAED; font-weight: 600; padding-left: 6px;")
+        self.setStartWidgets([title_label])
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        # 先让 content_window 处理 closeEvent（自动保存等）
+        self.content_window.closeEvent(event)
+        
+        # 如果事件被接受（真正关闭），则直接返回
+        if event.isAccepted():
+            return
+        
+        # 如果事件被忽略（最小化到托盘），则隐藏窗口
+        if not event.isAccepted():
+            self.hide()
+            event.ignore()
+
+    @QtCore.Slot()
+    def show_from_hotkey(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self.content_window.show_from_hotkey()
+
+    @QtCore.Slot()
+    def show_folder_favorites_from_hotkey(self) -> None:
+        self.show_from_hotkey()
+        self.content_window.show_folder_favorites_from_hotkey()
+
+    def set_tray_icon(self, tray: QtWidgets.QSystemTrayIcon | None) -> None:
+        self.content_window.set_tray_icon(tray)
+
+    @QtCore.Slot(str)
+    def append_log(self, message: str) -> None:
+        self.content_window.append_log(message)
+
+    def __getattr__(self, name: str):
+        return getattr(self.content_window, name)
 
 
 def _acquire_single_instance_lock(app: QtWidgets.QApplication) -> QtCore.QLockFile | None:

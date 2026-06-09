@@ -802,6 +802,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._ensure_open_file_tab()
             # 重启按钮放在标签栏右上角（「+ 打开文件」标签右侧）
             self.btn_restart = QtWidgets.QPushButton("重启", self)
+            self.btn_restart.setFixedHeight(20)
             self.btn_restart.setObjectName("btn_restart")
             self.btn_restart.clicked.connect(self._restart_app)
             self.tabs.setCornerWidget(self.btn_restart, QtCore.Qt.Corner.TopRightCorner)
@@ -904,8 +905,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 self._open_external_file()
             return
 
-        # 记录上一次有效标签索引（排除「+ 打开文件」）
-        if not self._is_open_file_tab(index):
+
+        # 记录上一次有效标签索引（排除「+ 打开文件」和「重启」）
+        if not self._is_open_file_tab(index) and not self._is_restart_tab(index):
             self._prev_main_tab_index = index
 
         if index < 0 or self.log_view is None or self._tab_log_widget is None:
@@ -2056,6 +2058,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             )
             self.btn_open_external_file.clicked.connect(self._open_external_file)
 
+
         self.btn_save.setObjectName("PrimaryButton")
         self.btn_ai_ask.setObjectName("PrimaryButton")
         self.btn_delete.setObjectName("DangerButton")
@@ -3065,7 +3068,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         def _worker() -> None:
             try:
                 req = urllib.request.Request(SILICONFLOW_PRICING_URL, method="GET")
-                with _SILICONFLOW_OPENER.open(req, timeout=30) as resp:
+                with _SILICONFLOW_OPENER.open(req, timeout=5) as resp:  # 从30秒减少到5秒
                     html = resp.read().decode("utf-8", errors="replace")
                 prices = self._parse_official_pricing_page(html)
                 if not prices:
@@ -3290,11 +3293,16 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         return ret == QtWidgets.QMessageBox.StandardButton.Yes
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        self._auto_save_note("窗口关闭")
+        try:
+            self._auto_save_note("窗口关闭")
+        except Exception as e:
+            self.append_log(f"窗口关闭时自动保存失败: {e}")
+        
         if self._allow_close:
             self._save_settings()
             event.accept()
             return
+        
         self._save_settings()
         self.save_window_position()
         self.hide()
@@ -4215,6 +4223,47 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             chunks.append(f"{role}:\n{msg.get('content', '')}\n")
         if session.streaming_text:
             chunks.append(f"AI(输出中):\n{session.streaming_text}")
+        return "\n".join(chunks).strip()
+
+    def _restore_window_state(self) -> None:
+        geo = self._settings.value("window/geometry")
+        if isinstance(geo, (bytes, bytearray)):
+            self.restoreGeometry(geo)
+
+        if session.streaming_text:
+            chunks.append(f"AI(输出中):\n{session.streaming_text}")
+        return "\n".join(chunks).strip()
+
+    def _restore_window_state(self) -> None:
+        geo = self._settings.value("window/geometry")
+        if isinstance(geo, (bytes, bytearray)):
+            self.restoreGeometry(geo)
+
+        return "\n".join(chunks).strip()
+
+    def _restore_window_state(self) -> None:
+        geo = self._settings.value("window/geometry")
+        if isinstance(geo, (bytes, bytearray)):
+            self.restoreGeometry(geo)
+
+        if isinstance(geo, (bytes, bytearray)):
+            self.restoreGeometry(geo)
+
+        return "\n".join(chunks).strip()
+
+    def _restore_window_state(self) -> None:
+        geo = self._settings.value("window/geometry")
+        if isinstance(geo, (bytes, bytearray)):
+            self.restoreGeometry(geo)
+
+            chunks.append(f"AI(输出中):\n{session.streaming_text}")
+        return "\n".join(chunks).strip()
+
+    def _restore_window_state(self) -> None:
+        geo = self._settings.value("window/geometry")
+        if isinstance(geo, (bytes, bytearray)):
+            self.restoreGeometry(geo)
+
         return "\n".join(chunks).strip()
 
     def _restore_window_state(self) -> None:

@@ -28,10 +28,9 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
         self._setup_ui()
         self._refresh_list()
         self._refresh_clipboard_display()
-        # 启动定时器定期检测剪贴板变化
-        self._clipboard_timer = QtCore.QTimer(self)
-        self._clipboard_timer.timeout.connect(self._refresh_clipboard_display)
-        self._clipboard_timer.start(1000)
+        # 使用 Qt 剪贴板信号替代定时器，事件驱动更高效
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.dataChanged.connect(self._on_clipboard_changed)
 
     def set_caller_hwnd(self, hwnd: int) -> None:
         """设置快捷键触发时的前台窗口句柄（由 ui.py 调用）"""
@@ -159,11 +158,40 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
         clipboard_title_row.addWidget(clipboard_title)
         clipboard_title_row.addStretch()
 
+        self.btn_refresh_clipboard = QtWidgets.QPushButton("🔄 刷新")
+        self.btn_refresh_clipboard.setObjectName("ClipboardRefreshButton")
+        self.btn_refresh_clipboard.setStyleSheet(
+            """QPushButton#ClipboardRefreshButton {
+                padding: 3px 12px;
+                font-size: 12px;
+                border: 1px solid rgba(137, 221, 255, 0.25);
+                border-radius: 8px;
+                background: rgba(255,255,255,0.04);
+                color: #89DDFF;
+                margin: 0 4px;
+            }
+            QPushButton#ClipboardRefreshButton:hover {
+                background: rgba(137, 221, 255, 0.15);
+            }"""
+        )
+        self.btn_refresh_clipboard.clicked.connect(self._refresh_clipboard_display)
+        clipboard_title_row.addWidget(self.btn_refresh_clipboard)
+
         self.btn_clear_clipboard = QtWidgets.QPushButton("🗑️ 清除全部")
+        self.btn_clear_clipboard.setObjectName("ClipboardClearButton")
         self.btn_clear_clipboard.setStyleSheet(
-            "QPushButton { background-color: #3c3c3c; color: #cccccc; border: 1px solid #555; "
-            "border-radius: 3px; padding: 2px 8px; font-size: 11px; }"
-            "QPushButton:hover { background-color: #505050; }"
+            """QPushButton#ClipboardClearButton {
+                padding: 3px 12px;
+                font-size: 12px;
+                border: 1px solid rgba(255, 85, 85, 0.25);
+                border-radius: 8px;
+                background: rgba(255,255,255,0.04);
+                color: #f07178;
+                margin: 0 4px;
+            }
+            QPushButton#ClipboardClearButton:hover {
+                background: rgba(255, 85, 85, 0.15);
+            }"""
         )
         self.btn_clear_clipboard.clicked.connect(self._clear_clipboard_history)
         clipboard_title_row.addWidget(self.btn_clear_clipboard)
@@ -513,7 +541,14 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
     # ===== 剪贴板历史相关方法 =====
 
     def _refresh_clipboard_display(self) -> None:
-        """刷新剪贴板显示列表"""
+        """初始化时刷新剪贴板显示列表（直接显示已加载的历史记录）"""
+        self._update_clipboard_list()
+        # 初始化当前剪贴板内容
+        clipboard = QtWidgets.QApplication.clipboard()
+        self._last_clipboard_text = clipboard.text().strip()
+
+    def _on_clipboard_changed(self) -> None:
+        """剪贴板内容变化时的回调（Qt 信号驱动）"""
         if not hasattr(self, "clipboard_list"):
             return
 
@@ -535,10 +570,15 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
                 },
             )
             self._save_clipboard_history()
+            # 只在内容变化时更新UI
+            self._update_clipboard_list()
 
         self._last_clipboard_text = current_text
 
-        # 更新显示 - 显示所有记录
+    def _update_clipboard_list(self) -> None:
+        """更新剪贴板列表显示（仅在内容变化时调用）"""
+        if not hasattr(self, "clipboard_list"):
+            return
         self.clipboard_list.clear()
         for item in self.clipboard_history:
             display_text = f"[{item['time']}] {item['text']}"
@@ -546,6 +586,9 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
             list_item.setData(QtCore.Qt.UserRole, item["text"])
             list_item.setToolTip(item["text"])
             self.clipboard_list.addItem(list_item)
+        # 更新记录数量显示
+        if hasattr(self, "clipboard_count_label"):
+            self.clipboard_count_label.setText(f"{len(self.clipboard_history)} 条")
 
     def _show_clipboard_context_menu(self, position: QtCore.QPoint) -> None:
         """显示剪贴板历史右键菜单"""
@@ -590,7 +633,7 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
             h for h in self.clipboard_history if h["text"] != text
         ]
         self._save_clipboard_history()
-        self._refresh_clipboard_display()
+        self._update_clipboard_list()
 
     def _clear_clipboard_history(self) -> None:
         """清除剪贴板历史"""
@@ -606,5 +649,5 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
         if reply == QtWidgets.QMessageBox.Yes:
             self.clipboard_history = []
             self._save_clipboard_history()
-            self._refresh_clipboard_display()
+            self._update_clipboard_list()
             print("✓ 剪贴板历史已清除")
