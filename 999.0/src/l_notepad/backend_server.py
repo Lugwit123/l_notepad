@@ -136,7 +136,8 @@ def create_app(db_path: Path) -> FastAPI:
 
     @app.get("/api/notes", response_model=list[NoteOut])
     def list_notes(limit: int = 200) -> list[NoteOut]:
-        notes = file_store.list_notes(notes_root, limit=limit)
+        # 列表只返回摘要，读文件头即可，避免读取整篇全文。
+        notes = file_store.list_notes_brief(notes_root, limit=limit)
         return [NoteOut.from_file_note(n, include_content=False) for n in notes]
 
     @app.post("/api/notes", response_model=NoteOut)
@@ -224,9 +225,25 @@ def create_app(db_path: Path) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Write failed: {e}")
         return {"ok": True}
 
+    @app.delete("/api/logs/{log_path:path}")
+    def delete_log(log_path: str) -> dict[str, Any]:
+        """Delete a server log file."""
+        log_root = SERVER_LOG_DIR
+        target = (log_root / log_path.replace("/", os.sep)).resolve()
+        if log_root.resolve() not in target.parents and target != log_root.resolve():
+            raise HTTPException(status_code=403, detail="Access denied")
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="Log file not found")
+        try:
+            target.unlink()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+        return {"ok": True}
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
-        notes = file_store.list_notes(notes_root, limit=200)
+        # 状态页只展示标题与时间，使用 meta 列表，零文件内容读取。
+        notes = file_store.list_notes_meta(notes_root, limit=200)
         # Starlette 1.0+ expects (request, name, context). Older versions accepted (name, context).
         return templates.TemplateResponse(
             request,
@@ -262,7 +279,8 @@ def create_app(db_path: Path) -> FastAPI:
 
     @app.get("/web/new", response_class=HTMLResponse)
     def web_new(request: Request) -> HTMLResponse:
-        notes = file_store.list_notes(notes_root, limit=500)
+        # 编辑页侧栏只显示标题/时间/短摘要，读文件头即可。
+        notes = file_store.list_notes_brief(notes_root, limit=500)
         return templates.TemplateResponse(
             request,
             "web_edit.html",
@@ -287,7 +305,8 @@ def create_app(db_path: Path) -> FastAPI:
 
     @app.get("/web/{note_path:path}", response_class=HTMLResponse)
     def web_edit(request: Request, note_path: str) -> HTMLResponse:
-        notes = file_store.list_notes(notes_root, limit=500)
+        # 编辑页侧栏只需短摘要；当前笔记全文单独 get_note 读取。
+        notes = file_store.list_notes_brief(notes_root, limit=500)
         note = file_store.get_note(notes_root, note_path)
         if not note:
             raise HTTPException(status_code=404, detail="Note not found")

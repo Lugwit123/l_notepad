@@ -103,6 +103,12 @@ def main() -> int:
         return 2
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    try:
+        from l_qt_wgt_lib import install_combobox_wheel_guard
+
+        install_combobox_wheel_guard(app)
+    except Exception:
+        pass
     lock = _acquire_single_instance_lock(app)
     if lock is None:
         with suppress(Exception):

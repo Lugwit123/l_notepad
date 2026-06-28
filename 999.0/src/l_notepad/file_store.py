@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -105,17 +106,31 @@ def iter_note_files(root_dir: Path) -> Iterable[Path]:
     return (p for p in root_dir.rglob("*") if p.is_file())
 
 
-def list_notes_meta(root_dir: Path, limit: int = 500) -> list[FileNoteMeta]:
+# 列表场景只需读文件头即可生成摘要，避免把整篇大文件读进内存。
+_BRIEF_HEAD_CHARS = 8192
+
+
+def _scan_files_sorted(root_dir: Path, limit: int) -> list[tuple[Path, os.stat_result]]:
+    """扫描一次目录，每个文件只 stat 一次，按修改时间倒序返回受限列表。"""
     ensure_root(root_dir)
-    files = list(iter_note_files(root_dir))
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    entries: list[tuple[Path, os.stat_result]] = []
+    for p in iter_note_files(root_dir):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        entries.append((p, st))
+    entries.sort(key=lambda e: e[1].st_mtime, reverse=True)
+    return entries[: max(1, limit)]
+
+
+def list_notes_meta(root_dir: Path, limit: int = 500) -> list[FileNoteMeta]:
     out: list[FileNoteMeta] = []
-    for p in files[: max(1, limit)]:
+    for p, st in _scan_files_sorted(root_dir, limit):
         try:
             rel = p.relative_to(root_dir).as_posix()
         except Exception:
             continue
-        st = p.stat()
         out.append(
             FileNoteMeta(
                 path=rel,
@@ -127,17 +142,41 @@ def list_notes_meta(root_dir: Path, limit: int = 500) -> list[FileNoteMeta]:
     return out
 
 
-def list_notes(root_dir: Path, limit: int = 500) -> list[FileNote]:
-    ensure_root(root_dir)
-    files = list(iter_note_files(root_dir))
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+def list_notes_brief(root_dir: Path, limit: int = 500, *, head_chars: int = _BRIEF_HEAD_CHARS) -> list[FileNote]:
+    """列出笔记，每个文件只读开头 head_chars 个字符用于生成摘要。
+
+    适用于只展示标题/时间/摘要、不需要全文的列表场景。
+    """
     out: list[FileNote] = []
-    for p in files[: max(1, limit)]:
+    for p, st in _scan_files_sorted(root_dir, limit):
         try:
             rel = p.relative_to(root_dir).as_posix()
         except Exception:
             continue
-        st = p.stat()
+        try:
+            with p.open("r", encoding="utf-8", errors="replace") as f:
+                content = f.read(head_chars)
+        except Exception:
+            content = ""
+        out.append(
+            FileNote(
+                path=rel,
+                title=rel,
+                content=content,
+                created_at=_iso_from_ts(st.st_ctime),
+                updated_at=_iso_from_ts(st.st_mtime),
+            )
+        )
+    return out
+
+
+def list_notes(root_dir: Path, limit: int = 500) -> list[FileNote]:
+    out: list[FileNote] = []
+    for p, st in _scan_files_sorted(root_dir, limit):
+        try:
+            rel = p.relative_to(root_dir).as_posix()
+        except Exception:
+            continue
         try:
             content = p.read_text(encoding="utf-8")
         except Exception:
@@ -204,7 +243,8 @@ def create_note(root_dir: Path, title: str, content: str, category_dir: str = ""
     rel_dir = str(PurePosixPath(rel_dir)) if rel_dir not in {"", "."} else ""
     if rel_dir.startswith(".."):
         raise ValueError("invalid category")
-    base = root_dir.joinpath(*([p for p in rel_dir.split("/") if p] if rel_dir else []))
+    base = root_dir.joinpath(
+        *([p for p in rel_dir.split("/") if p] if rel_dir else []))
     base.mkdir(parents=True, exist_ok=True)
     target = _unique_path(root_dir, (base / filename))
     target.write_text(content or "", encoding="utf-8")
@@ -241,6 +281,31 @@ def update_note(
     return get_note(root_dir, rel)
 
 
+def move_note(root_dir: Path, rel_posix_path: str, dst_dir: str) -> FileNote | None:
+    """把笔记文件移动到 dst_dir 目录下（保持原文件名），返回新位置的笔记。"""
+    ensure_root(root_dir)
+    note = get_note(root_dir, rel_posix_path)
+    if not note:
+        return None
+    src = resolve_note_path(root_dir, note.path)
+    rel_dir = (dst_dir or "").strip().lstrip("/").replace("\\", "/")
+    rel_dir = str(PurePosixPath(rel_dir)) if rel_dir not in {"", "."} else ""
+    if rel_dir.startswith(".."):
+        raise ValueError("invalid dest dir")
+    base = (
+        root_dir.joinpath(*[p for p in rel_dir.split("/") if p])
+        if rel_dir
+        else root_dir
+    )
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / src.name
+    if target.resolve() == src.resolve():
+        return get_note(root_dir, src.relative_to(root_dir).as_posix())
+    target = _unique_path(root_dir, target)
+    src.rename(target)
+    return get_note(root_dir, target.relative_to(root_dir).as_posix())
+
+
 def delete_note(root_dir: Path, rel_posix_path: str) -> bool:
     ensure_root(root_dir)
     try:
@@ -260,4 +325,3 @@ def delete_note(root_dir: Path, rel_posix_path: str) -> bool:
             break
         cur = cur.parent
     return True
-

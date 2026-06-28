@@ -76,6 +76,10 @@ class NotepadApi:
         """Update (overwrite) a server log file."""
         self._put(f"/api/logs/{log_path}", {"title": "", "content": content})
 
+    def delete_log(self, log_path: str) -> None:
+        """Delete a server log file."""
+        self._delete(f"/api/logs/{log_path}")
+
     def _get(self, path: str) -> Any:
         return self._request("GET", path, None)
 

@@ -15,7 +15,6 @@ requires = [
     "pydantic",
     "pyside6",
     "l_qt_wgt_lib",
-    "l_folder_favorites",
 ]
 
 build_command = False
@@ -34,6 +33,8 @@ def commands():
     # Pure PC mode: local file-based notes, no backend process.
     # 使用 cmd /c 包装以设置 UTF-8 代码页
     alias("l_notepad", "python -m l_notepad.local_main")
+    # 原始模式：不使用自定义无边框标题栏，使用系统原生标题栏
+    alias("l_notepad_ori", "python -m l_notepad.local_main_ori")
     # Keep original behavior: launch UI with embedded backend service.
     alias("l_notepad_with_api", "python -m l_notepad.main")
     alias("l_notepad_api", "python -m l_notepad.backend_server")

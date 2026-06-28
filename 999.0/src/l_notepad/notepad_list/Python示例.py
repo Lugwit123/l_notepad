@@ -2,10 +2,10 @@ import sys
 sys.path.append(r"D:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\rez-package-source\pytracemp\999.0\src")
 import pytracemp
 pytracemp = pytracemp.reload_pytracemp()
-lprint = pytracemp.LPrint()
-from imp import reload
-from pyblish_plugins_global.integrate import link_textures
-reload(link_textures)
+ lprint = pytracemp.LPrint()
+        from imp import reload
+        from pyblish_plugins_global.integrate import link_textures
+        reload(link_textures)
 IntegrateLinkTextures=link_textures.IntegrateLinkTextures
 class Ctx(object):
     data = {

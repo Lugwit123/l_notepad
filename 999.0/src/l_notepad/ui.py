@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import subprocess
 import sys
 import json
@@ -27,7 +28,9 @@ except Exception:  # pragma: no cover - shiboken6 随 PySide6 提供，兜底避
     shiboken6 = None
 
 from .api_client import ApiError, LogDto, NotepadApi, NoteDto
+from . import history_store
 from .folder_favorites_widget import FolderFavoritesWidget as FolderFavoritesPanel
+from .account_favorites_widget import AccountFavoritesWidget as AccountFavoritesPanel
 from .settings_widget import SettingsWidget
 
 # 从 l_qt_wgt_lib 导入代码编辑器组件
@@ -76,7 +79,10 @@ AI_PROVIDERS: dict[str, tuple[str, str, list[str], str]] = {
 DEFAULT_PROVIDER = "SiliconFlow"
 ASK_AI_ITEM_ID = "__ask_ai__"
 ASK_AI_SESSION_PREFIX = "__ask_ai_session__:"
+NOTE_REORDER_MIME = "application/x-l-notepad-note-reorder"
 EXTERNAL_FILE_PREFIX = "__external_file__:"
+IPC_FILE_PREFIX = "__ipc_file__:"
+IPC_FILE_FOLDER_ID = "__ipc_file_folder__"
 SERVER_LOG_PREFIX = "__server_log__:"
 SERVER_LOG_FOLDER_ID = "__server_log_folder__"
 SERVER_LOG_SUB_PREFIX = "__server_log_sub__:"
@@ -238,11 +244,13 @@ class AiSession:
     messages: list[dict[str, str]]
     draft_prompt: str = ""
     streaming_text: str = ""
+    reasoning_text: str = ""   # 推理阶段思考内容（DeepSeek-R1 等）
     in_flight: bool = False
 
 
 class AiBridge(QtCore.QObject):
     chunk = QtCore.Signal(int, str, str)
+    reasoning_chunk = QtCore.Signal(int, str, str)   # 推理阶段 reasoning_content
     finished = QtCore.Signal(int, str, bool, str, str)
 
 
@@ -324,6 +332,9 @@ class _NoteTreeItemDelegate(QtWidgets.QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         base = super().sizeHint(option, index)
+        role = index.data(QtCore.Qt.ItemDataRole.UserRole) or ""
+        if isinstance(role, str) and role.startswith("__folder__:"):
+            return QtCore.QSize(base.width(), 20)
         text = index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""
         lines = text.split("\n") if isinstance(text, str) else [str(text)]
         return QtCore.QSize(base.width(), max(32, len(lines) * 14 + 4))
@@ -390,6 +401,27 @@ class _NoteTreeProxyStyle(QtWidgets.QProxyStyle):
         painter.drawLine(mid_x, mid_y, rect.right(), mid_y)
 
         painter.restore()
+
+
+class _VersionComboBox(QtWidgets.QComboBox):
+    """版本历史下拉框：展开前发出信号以便重新拉取最新版本列表。
+
+    弹出列表会按内容自适应加宽（可超出下拉框本体宽度），不省略文字。
+    """
+
+    aboutToShowPopup = QtCore.Signal()
+
+    def showPopup(self) -> None:
+        self.aboutToShowPopup.emit()
+        view = self.view()
+        fm = view.fontMetrics()
+        max_w = 0
+        for i in range(self.count()):
+            max_w = max(max_w, fm.horizontalAdvance(self.itemText(i)))
+        if max_w > 0:
+            view.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+            view.setMinimumWidth(max_w + 32)
+        super().showPopup()
 
 
 class RightPanel(QtWidgets.QWidget):
@@ -462,6 +494,27 @@ class RightPanel(QtWidgets.QWidget):
         self.tab_count.setObjectName("tab_count")
         token_row.addWidget(self.tab_count)
         root.addLayout(token_row)
+
+        # ---- 版本历史行（切换历史修改版本）
+        version_row = QtWidgets.QHBoxLayout()
+        version_row.setSpacing(8)
+        self.label_version = QtWidgets.QLabel("📜 版本", self)
+        self.label_version.setObjectName("label_version")
+        version_row.addWidget(self.label_version)
+        self.combo_version = _VersionComboBox(self)
+        self.combo_version.setObjectName("combo_version")
+        self.combo_version.setToolTip("查看并切换到该笔记/日志的历史保存版本")
+        self.combo_version.setMinimumWidth(260)
+        self.combo_version.setStyleSheet(
+            "QComboBox#combo_version { font-size: 10px; padding: 1px 4px; }"
+            "QComboBox#combo_version QAbstractItemView { font-size: 10px; }"
+            "QComboBox#combo_version QAbstractItemView::item {"
+            " padding: 1px 4px; min-height: 16px; }"
+        )
+        self.combo_version.addItem("📜 切换版本", None)
+        version_row.addWidget(self.combo_version)
+        version_row.addStretch()
+        root.addLayout(version_row)
 
         # ---- AI 标签页（含 Template 标签）
         self.ai_tabs = QtWidgets.QTabWidget(self)
@@ -576,6 +629,8 @@ class RightPanel(QtWidgets.QWidget):
             "btn_save": self.btn_save,
             "btn_delete": self.btn_delete,
             "btn_ai_ask": self.btn_ai_ask,
+            "label_version": self.label_version,
+            "combo_version": self.combo_version,
         }
         for key, widget in mapping.items():
             setattr(mw, key, widget)
@@ -593,7 +648,10 @@ class RightPanel(QtWidgets.QWidget):
         self._ai_tab_template_widget.hide()
 
 
-class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
+class MainWindow(TrayAwareMixin, QtWidgets.QWidget):
+    # 请求外层（自定义标题栏外壳）更新标题文本
+    title_text_changed = QtCore.Signal(str)
+
     def __init__(self, api: NotepadApi, restart_callback=None, hotkey_interval_callback=None, hotkey_key_callback=None) -> None:
         super().__init__()
         self.api = api
@@ -604,6 +662,15 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._allow_close = False
         self._settings = QtCore.QSettings("Lugwit", "l_notepad_pc")
         self._favorite_order: list[int] = []
+        # 手动排序：相对路径(note.title)的全局有序列表，持久化到配置目录的 note_order.json
+        self._note_order: list[str] = []
+        # 中键拖拽调序的临时状态
+        self._mid_drag_src_title: str | None = None
+        self._mid_drag_src_item: QtWidgets.QTreeWidgetItem | None = None
+        self._mid_drag_start_pos: QtCore.QPoint | None = None
+        self._mid_dragging = False
+        self._drop_indicator: QtWidgets.QRubberBand | None = None
+        self._drop_box: QtWidgets.QRubberBand | None = None
         self._last_open_note_id: int | None = None
         # 从设置中加载 AI 模型，如果保存过则使用保存的值
         saved_model = self._settings.value("ai/model", "")
@@ -615,7 +682,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._text_font_size = 10
         self._ask_ai_mode = False
         self._external_files: list[str] = []
+        self._ipc_files: list[str] = []
         self._current_external_file: str | None = None
+        self._current_ipc_file: str | None = None
         self._current_server_log_path: str | None = None
         self._ai_sessions: dict[str, AiSession] = {}
         self._current_ai_session_id: str | None = None
@@ -632,6 +701,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         sys.excepthook = self._log_unhandled_exception
         self._ai_bridge = AiBridge()
         self._ai_bridge.chunk.connect(self._on_ai_chunk)
+        self._ai_bridge.reasoning_chunk.connect(self._on_ai_reasoning_chunk)
         self._ai_bridge.finished.connect(self._on_ai_finished)
         self._model_bridge = ModelBridge()
         self._model_bridge.finished.connect(self._on_models_loaded)
@@ -650,6 +720,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
         ui_path = Path(__file__).resolve().parent / "main_window.ui"
         loader = QtUiTools.QUiLoader(self)
+        try:
+            loader.registerCustomWidget(FolderFavoritesPanel)
+            loader.registerCustomWidget(AccountFavoritesPanel)
+        except Exception:
+            pass
         ui_file = QtCore.QFile(str(ui_path))
         if not ui_file.open(QtCore.QIODevice.OpenModeFlag.ReadOnly):
             raise RuntimeError(f"Failed to open ui file: {ui_path}")
@@ -663,12 +738,31 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         # 右侧面板由代码构建（RightPanel 类），每次切换文件时重建实例，
         # 彻底规避旧版本中 QWidget 失效的问题。
         _cw = loaded.findChild(QtWidgets.QWidget, "centralwidget")
-        self.setCentralWidget(_cw)
-        # loaded 的 C++ QMainWindow 在 setCentralWidget 后已不再需要，
-        # 显式删除避免 PySide6 的 Python 包装器干扰后续 findChild。
-        del loaded
-        import gc as _gc
-        _gc.collect()
+        if _cw is None and loaded.objectName() in {"centralwidget", "MainWindowRoot"}:
+            _cw = loaded
+        if _cw is None:
+            tabs = loaded.findChild(QtWidgets.QTabWidget, "tabs")
+            if tabs is not None:
+                _cw = loaded
+        if _cw is None:
+            child_names = [child.objectName() for child in loaded.findChildren(QtWidgets.QWidget)]
+            raise RuntimeError(
+                f"main_window.ui missing usable root widget; root={loaded.objectName()!r}; "
+                f"children={child_names[:30]}"
+            )
+        # QWidget 基类无 setCentralWidget：用根布局承载 centralwidget，
+        # 状态栏在 _setupUiComponents 中追加到该布局底部。
+        self._root_layout = QtWidgets.QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
+        _cw.setParent(self)
+        self._root_layout.addWidget(_cw)
+        # loaded 的 C++ 根 QWidget 在 reparent centralwidget 后已不再需要；如果
+        # centralwidget 就是根对象，不能删除 loaded，否则会把实际界面删掉。
+        if loaded is not _cw:
+            del loaded
+            import gc as _gc
+            _gc.collect()
 
         # 通过 self.findChild 查找全部控件（centralwidget 已 reparent 到 self）
         self.tabs = self.findChild(QtWidgets.QTabWidget, "tabs")
@@ -781,38 +875,55 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
         self._tab_main_widget = self.findChild(QtWidgets.QWidget, "tab_main")
         self._tab_log_widget = self.findChild(QtWidgets.QWidget, "tab_log")
-        self._folder_favorites_panel = FolderFavoritesPanel(self, restart_callback=self._restart_app)
+        self._folder_favorites_panel = self.findChild(FolderFavoritesPanel, "tab_folder_favorites")
+        if self._folder_favorites_panel is None:
+            self._folder_favorites_panel = FolderFavoritesPanel(self, restart_callback=self._restart_app)
+        else:
+            self._folder_favorites_panel._restart_callback = self._restart_app
+            if hasattr(self._folder_favorites_panel, "finalize_ui"):
+                self._folder_favorites_panel.finalize_ui()
+        # 收藏夹识别到调用程序/路径后，转发给外层更新自定义标题栏
+        if hasattr(self._folder_favorites_panel, "caller_info_changed"):
+            self._folder_favorites_panel.caller_info_changed.connect(self.title_text_changed)
+            # 原生标题栏模式（l_notepad_ori）下本窗口即顶层，直接更新窗口标题
+            self.title_text_changed.connect(self.setWindowTitle)
         self._folder_favorites_tab_index = -1
-        self._settings_widget = SettingsWidget(self)
-        if hasattr(self._settings_widget, "font_size_spin"):
-            self._settings_widget.font_size_spin.blockSignals(True)
-            self._settings_widget.font_size_spin.setValue(self._text_font_size)
-            self._settings_widget.font_size_spin.blockSignals(False)
+        
+        # 网址收藏标签页
+        self._url_favorites_panel = self.findChild(FolderFavoritesPanel, "tab_url_favorites")
+        if self._url_favorites_panel is None:
+            self._url_favorites_panel = FolderFavoritesPanel(self, restart_callback=self._restart_app)
+            self._url_favorites_panel.set_favorites_kind("url")
+        else:
+            self._url_favorites_panel._restart_callback = self._restart_app
+            self._url_favorites_panel.set_favorites_kind("url")
+            if hasattr(self._url_favorites_panel, "finalize_ui"):
+                self._url_favorites_panel.finalize_ui()
+        self._url_favorites_tab_index = -1
+        
+        # 延迟创建 SettingsWidget，在首次打开设置弹窗时才实例化
+        self._settings_widget: SettingsWidget | None = None
         if self.tabs is not None:
-            # 插入文件夹收藏标签页（索引 1）
-            self.tabs.insertTab(1, self._folder_favorites_panel, " 文件夹收藏")
+            if self.tabs.indexOf(self._folder_favorites_panel) < 0:
+                self.tabs.insertTab(1, self._folder_favorites_panel, " 文件夹收藏")
             self._folder_favorites_tab_index = self.tabs.indexOf(self._folder_favorites_panel)
-            # 插入设置标签页（在日志之前）
-            log_index = self.tabs.indexOf(self._tab_log_widget)
-            if log_index >= 0:
-                self.tabs.insertTab(log_index, self._settings_widget, "设置")
-            else:
-                # 如果找不到日志标签页，插入到最后
-                self.tabs.addTab(self._settings_widget, "设置")
-            self._ensure_open_file_tab()
-            # 重启按钮放在标签栏右上角（「+ 打开文件」标签右侧）
+            
+            if self.tabs.indexOf(self._url_favorites_panel) < 0:
+                # 插入到文件夹收藏之后
+                self.tabs.insertTab(2, self._url_favorites_panel, "🌐 网址收藏")
+            self._url_favorites_tab_index = self.tabs.indexOf(self._url_favorites_panel)
+            
+            # 标签栏右键菜单（支持文件夹收藏和网址收藏）
+            _tab_bar = self.tabs.tabBar()
+            _tab_bar.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+            _tab_bar.customContextMenuRequested.connect(self._on_tab_bar_context_menu)
+            # 重启按钮放在标签栏右上角
             self.btn_restart = QtWidgets.QPushButton("重启", self)
             self.btn_restart.setFixedHeight(20)
             self.btn_restart.setObjectName("btn_restart")
             self.btn_restart.clicked.connect(self._restart_app)
             self.tabs.setCornerWidget(self.btn_restart, QtCore.Qt.Corner.TopRightCorner)
-            self._settings_widget.indent_display_changed.connect(
-                self._apply_indent_display_settings
-            )
-            self._settings_widget.folder_hotkey_changed.connect(
-                self._on_folder_hotkey_button_changed
-            )
-            self._settings_widget.font_size_changed.connect(self._set_text_font_size)
+            # 信号连接延迟到首次打开设置弹窗时执行
             self.tabs.currentChanged.connect(self._on_main_tab_changed)
 
         self.log_view.setObjectName("LogViewer")
@@ -827,16 +938,34 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 editor.installEventFilter(self)
                 editor.viewport().installEventFilter(self)
 
-        self.status = self.statusBar()
-        
+        # QWidget 基类无 statusBar()：手动创建 QStatusBar 并置于根布局底部
+        self.status = QtWidgets.QStatusBar(self)
+        self._root_layout.addWidget(self.status)
+
+        self._log_file_path_label = QtWidgets.QLabel("日志路径: 未设置")
+        self._console_log_path: str = ""
+        self._console_log_tailer = None
+        self._console_log_offset = 0
+        self._console_log_buffer = ""
+        self._console_log_path: str | None = None
+        self._log_file_path_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._log_file_path_label.setToolTip("当前日志文件路径")
+        # 日志路径显示在「日志」标签页内部顶部，而非状态栏
+        if self._tab_log_widget is not None and self._tab_log_widget.layout() is not None:
+            self._tab_log_widget.layout().insertWidget(0, self._log_file_path_label)
+
         # 状态栏添加当前高亮模式显示
         self._highlight_mode_label = QtWidgets.QLabel("高亮: 日志文件")
         self.status.addPermanentWidget(self._highlight_mode_label)
-        
+
         # 应用默认高亮模式（注意：需要在 _highlight_mode_label 创建之后调用）
         self._on_highlight_mode_changed("日志文件")
         
         self._refresh_official_prices()
+        # 初始化账号收藏
+        self._init_account_favorites()
         # 恢复 AI 标签页
         self._restore_ai_tabs()
         # 初始状态下隐藏 AI 相关控件（因为 _ask_ai_mode = False）
@@ -858,7 +987,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self.label_price_source.hide()
         self.refresh_notes()
         self._initializing = False
-        self.append_log("日志窗口已初始化")
+        self._append_console_line("日志窗口已初始化")
         QtWidgets.QApplication.instance().aboutToQuit.connect(self._save_settings)
 
     def _mode_from_filename(self, filename: str) -> str:
@@ -876,40 +1005,29 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _note_file_path(self, title: str) -> Path:
         return Path(__file__).resolve().parent / "notepad_list" / title
 
-    def _is_open_file_tab(self, index: int) -> bool:
-        """判断顶层标签索引是否为「+ 打开文件」占位页。"""
-        if self.tabs is None or index < 0 or index >= self.tabs.count():
-            return False
-        widget = self.tabs.widget(index)
-        return widget is not None and widget.objectName() == "_open_file_holder"
-
-    def _on_main_tab_changed(self, index: int) -> None:
-        # 拦截顶层「+ 打开文件」标签页：触发打开文件对话框后返回上一个标签
-        if self._is_open_file_tab(index):
-            prev_idx = getattr(self, "_prev_main_tab_index", 0)
-            try:
-                self.tabs.blockSignals(True)
-                if 0 <= prev_idx < self.tabs.count() and not self._is_open_file_tab(prev_idx):
-                    self.tabs.setCurrentIndex(prev_idx)
-                elif self.tabs.count() > 1:
-                    self.tabs.setCurrentIndex(0)
-                self.tabs.blockSignals(False)
-            except Exception:
-                try:
-                    self.tabs.blockSignals(False)
-                except Exception:
-                    pass
-            try:
-                self.btn_open_external_file.click()
-            except Exception:
-                self._open_external_file()
+    def _on_tab_bar_context_menu(self, pos) -> None:
+        """右键标签栏时弹出操作菜单（支持文件夹收藏和网址收藏）。"""
+        if self.tabs is None:
+            return
+        bar = self.tabs.tabBar()
+        idx = bar.tabAt(pos)
+        if idx < 0:
+            return
+        
+        # 检查是否是文件夹收藏标签页
+        if self._folder_favorites_panel and self.tabs.widget(idx) is self._folder_favorites_panel:
+            self._folder_favorites_panel.show_actions_menu(bar.mapToGlobal(pos))
+            return
+        
+        # 检查是否是网址收藏标签页
+        if self._url_favorites_panel and self.tabs.widget(idx) is self._url_favorites_panel:
+            # 为网址收藏显示简化菜单（只有添加网址）
+            menu = QtWidgets.QMenu(self)
+            menu.addAction(" 添加网址").triggered.connect(self._url_favorites_panel._add_url)
+            menu.exec(bar.mapToGlobal(pos))
             return
 
-
-        # 记录上一次有效标签索引（排除「+ 打开文件」和「重启」）
-        if not self._is_open_file_tab(index) and not self._is_restart_tab(index):
-            self._prev_main_tab_index = index
-
+    def _on_main_tab_changed(self, index: int) -> None:
         if index < 0 or self.log_view is None or self._tab_log_widget is None:
             return
         if self.tabs.widget(index) is not self._tab_log_widget:
@@ -981,8 +1099,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._show_error(str(e))
             return
 
-        current_id = None if self._current_external_file or self._current_server_log_path else self.state.current_note_id
-        if current_id is None and not self._current_external_file and not self._current_server_log_path:
+        current_id = None if self._current_external_file or self._current_ipc_file or self._current_server_log_path else self.state.current_note_id
+        if current_id is None and not self._current_external_file and not self._current_ipc_file and not self._current_server_log_path:
             current_id = self._last_open_note_id
         query = self.search_edit.text().strip()
         notes_sorted = self._sort_notes(notes)
@@ -997,11 +1115,15 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         elif current_id is not None:
             selected = self._select_note_id(current_id)
             if not selected:
-                self.append_log(f"刷新列表后未找到当前笔记: #{current_id}")
+                builtins.print(f"刷新列表后未找到当前笔记: #{current_id}")
         elif self._current_external_file:
             selected = self._select_external_file(self._current_external_file)
             if not selected:
-                self.append_log(f"刷新列表后未找到外部文件: {self._current_external_file}")
+                builtins.print(f"刷新列表后未找到外部文件: {self._current_external_file}")
+        elif self._current_ipc_file:
+            selected = self._select_ipc_file(self._current_ipc_file)
+            if not selected:
+                builtins.print(f"刷新列表后未找到 IPC 文件: {self._current_ipc_file}")
         elif self._current_server_log_path:
             # 服务器日志保持当前编辑状态，无需重新选择
             pass
@@ -1042,6 +1164,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         tree.customContextMenuRequested.connect(self._on_notes_tree_context_menu)
         tree.itemExpanded.connect(self._on_folder_expanded_or_collapsed)
         tree.itemCollapsed.connect(self._on_folder_expanded_or_collapsed)
+        # 中键拖拽调序：监听 viewport 鼠标/拖放事件（自管拖影 + 落点线）
+        tree.viewport().setAcceptDrops(True)
+        tree.viewport().installEventFilter(self)
 
     def _notes_count(self) -> int:
         if self._notes_tree_mode and self.notes_tree is not None:
@@ -1088,19 +1213,54 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             empty_item.setForeground(QtGui.QBrush(QtGui.QColor(120, 120, 120)))
             empty_item.setSizeHint(QtCore.QSize(0, 28))
             self.notes_list.addItem(empty_item)
-        for file_path in self._external_files:
-            path = Path(file_path)
-            if query and query.lower() not in path.name.lower():
-                continue
-            item = QtWidgets.QListWidgetItem(f"↗ {path.name}\n{file_path}")
-            font = item.font()
-            font.setBold(True)
-            item.setFont(font)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, f"{EXTERNAL_FILE_PREFIX}{file_path}")
-            item.setToolTip(file_path)
-            item.setSizeHint(QtCore.QSize(0, 44))
-            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
-            self.notes_list.addItem(item)
+        if self._external_files:
+            ext_folder = QtWidgets.QListWidgetItem("📁 外部文件")
+            ext_folder.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            ext_folder.setData(QtCore.Qt.ItemDataRole.UserRole, "__external_folder__")
+            ext_font = ext_folder.font()
+            ext_font.setBold(True)
+            ext_folder.setFont(ext_font)
+            ext_folder.setBackground(QtGui.QBrush(QtGui.QColor(245, 245, 245)))
+            ext_folder.setForeground(QtGui.QBrush(QtGui.QColor(90, 90, 90)))
+            ext_folder.setSizeHint(QtCore.QSize(0, 28))
+            self.notes_list.addItem(ext_folder)
+            for file_path in self._external_files:
+                path = Path(file_path)
+                if query and query.lower() not in path.name.lower():
+                    continue
+                item = QtWidgets.QListWidgetItem(f"  ↗ {path.name}\n  {file_path}")
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, f"{EXTERNAL_FILE_PREFIX}{file_path}")
+                item.setToolTip(file_path)
+                item.setSizeHint(QtCore.QSize(0, 44))
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                self.notes_list.addItem(item)
+        if self._ipc_files:
+            ipc_folder = QtWidgets.QListWidgetItem("📁 IPC 文件")
+            ipc_folder.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            ipc_folder.setData(QtCore.Qt.ItemDataRole.UserRole, IPC_FILE_FOLDER_ID)
+            ipc_font = ipc_folder.font()
+            ipc_font.setBold(True)
+            ipc_folder.setFont(ipc_font)
+            ipc_folder.setBackground(QtGui.QBrush(QtGui.QColor(245, 245, 245)))
+            ipc_folder.setForeground(QtGui.QBrush(QtGui.QColor(90, 90, 90)))
+            ipc_folder.setSizeHint(QtCore.QSize(0, 28))
+            self.notes_list.addItem(ipc_folder)
+            for file_path in self._ipc_files:
+                path = Path(file_path)
+                if query and query.lower() not in path.name.lower():
+                    continue
+                item = QtWidgets.QListWidgetItem(f"  ↗ {path.name}\n  {file_path}")
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, f"{IPC_FILE_PREFIX}{file_path}")
+                item.setToolTip(file_path)
+                item.setSizeHint(QtCore.QSize(0, 44))
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                self.notes_list.addItem(item)
         self._add_server_log_files_to_list(query=query)
         self.notes_list.blockSignals(False)
 
@@ -1166,13 +1326,36 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             empty_item = QtWidgets.QTreeWidgetItem([f"未找到匹配笔记：{query}"])
             empty_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, "__empty__")
             tree.addTopLevelItem(empty_item)
-        for file_path in self._external_files:
-            path = Path(file_path)
-            if query and query.lower() not in path.name.lower():
-                continue
-            item = QtWidgets.QTreeWidgetItem([f"↗ {path.name}", file_path])
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"{EXTERNAL_FILE_PREFIX}{file_path}")
-            tree.addTopLevelItem(item)
+        if self._external_files:
+            ext_folder = QtWidgets.QTreeWidgetItem(["📁 外部文件"])
+            ext_folder.setData(0, QtCore.Qt.ItemDataRole.UserRole, "__external_folder__")
+            ext_font = ext_folder.font(0)
+            ext_font.setBold(True)
+            ext_folder.setFont(0, ext_font)
+            ext_folder.setForeground(0, QtGui.QBrush(QtGui.QColor("#90A4AE")))
+            tree.addTopLevelItem(ext_folder)
+            for file_path in self._external_files:
+                path = Path(file_path)
+                if query and query.lower() not in path.name.lower():
+                    continue
+                item = QtWidgets.QTreeWidgetItem([f"  ↗ {path.name}", f"  {file_path}"])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"{EXTERNAL_FILE_PREFIX}{file_path}")
+                ext_folder.addChild(item)
+        if self._ipc_files:
+            ipc_folder = QtWidgets.QTreeWidgetItem(["📁 IPC 文件"])
+            ipc_folder.setData(0, QtCore.Qt.ItemDataRole.UserRole, IPC_FILE_FOLDER_ID)
+            ipc_font = ipc_folder.font(0)
+            ipc_font.setBold(True)
+            ipc_folder.setFont(0, ipc_font)
+            ipc_folder.setForeground(0, QtGui.QBrush(QtGui.QColor("#90A4AE")))
+            tree.addTopLevelItem(ipc_folder)
+            for file_path in self._ipc_files:
+                path = Path(file_path)
+                if query and query.lower() not in path.name.lower():
+                    continue
+                item = QtWidgets.QTreeWidgetItem([f"  ↗ {path.name}", f"  {file_path}"])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"{IPC_FILE_PREFIX}{file_path}")
+                ipc_folder.addChild(item)
         self._add_server_log_files_to_tree(tree, query=query)
         # ② 按持久化的展开状态恢复（未记录的文件夹默认展开；ASK_AI 默认折叠由外部控制）
         def _restore_expand_walk(node: QtWidgets.QTreeWidgetItem) -> None:
@@ -1273,12 +1456,93 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _show_log_context_menu(self, global_pos: QtCore.QPoint, log_path: str) -> None:
         """显示服务器日志项的右键菜单"""
         menu = QtWidgets.QMenu(self)
+
+        action_open = menu.addAction("打开日志")
+        action_open.triggered.connect(lambda: self._set_server_log_editor(log_path))
+
         base_url = self._get_log_server_url()
-        if base_url:
-            log_url = f"{base_url}/api/logs/{log_path}"
+        log_url = f"{base_url}/api/logs/{log_path}" if base_url else ""
+        if log_url:
             action_web = menu.addAction("使用网页访问该日志")
             action_web.triggered.connect(lambda: webbrowser.open(log_url))
+
+        menu.addSeparator()
+
+        action_copy_name = menu.addAction("复制文件名")
+        action_copy_name.triggered.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText(PurePosixPath(log_path).name)
+        )
+
+        action_copy_path = menu.addAction("复制日志路径")
+        action_copy_path.triggered.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText(log_path)
+        )
+
+        if log_url:
+            action_copy_url = menu.addAction("复制网页链接")
+            action_copy_url.triggered.connect(
+                lambda: QtWidgets.QApplication.clipboard().setText(log_url)
+            )
+
+        menu.addSeparator()
+
+        action_download = menu.addAction("下载到本地")
+        action_download.triggered.connect(lambda: self._download_server_log(log_path))
+
+        action_delete = menu.addAction("删除日志")
+        action_delete.triggered.connect(lambda: self._delete_server_log(log_path))
+
+        menu.addSeparator()
+
+        action_refresh = menu.addAction("刷新日志列表")
+        action_refresh.triggered.connect(lambda: self._reload_server_logs())
+
         menu.exec(global_pos)
+
+    def _download_server_log(self, log_path: str) -> None:
+        """下载服务器日志到本地文件。"""
+        file_name = PurePosixPath(log_path).name
+        target, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "下载日志到本地", file_name
+        )
+        if not target:
+            return
+        content = self._get_log_content_cached(log_path)
+        if content is None:
+            return
+        try:
+            Path(target).write_text(content, encoding="utf-8")
+        except Exception as exc:
+            self._show_error(f"下载失败：{exc}")
+            return
+        self.status.showMessage(f"已下载日志到 {target}", 2500)
+
+    def _delete_server_log(self, log_path: str) -> None:
+        """删除服务器日志（带确认）。"""
+        file_name = PurePosixPath(log_path).name
+        ret = QtWidgets.QMessageBox.question(
+            self,
+            "删除日志",
+            f"确定删除日志 {file_name} 吗？此操作不可恢复。",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if ret != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.api.delete_log(log_path)
+        except Exception as exc:
+            self._show_error(f"删除日志失败：{exc}")
+            return
+        self._invalidate_log_content_cache(log_path)
+        # 若正在编辑该日志，清空编辑器
+        if self._current_server_log_path == log_path:
+            self._stop_server_log_tail()
+            self._current_server_log_path = None
+            self._set_editor(None)
+        self.status.showMessage(f"已删除日志 {file_name}", 2500)
+        self._reload_server_logs()
 
     def _ensure_tree_folder_item(self, tree: QtWidgets.QTreeWidget, folder_path: str) -> QtWidgets.QTreeWidgetItem:
         parts = [p for p in folder_path.replace("\\", "/").split("/") if p]
@@ -1298,6 +1562,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 found = QtWidgets.QTreeWidgetItem([f"▾ 📁 {part}"])
                 found.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"__folder__:{current_path_str}")
                 found.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, part)  # 保留纯名称用于更新计数/图标
+                found.setSizeHint(0, QtCore.QSize(0, 20))
                 folder_font = found.font(0)
                 folder_font.setBold(True)
                 found.setFont(0, folder_font)
@@ -1378,6 +1643,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         # 文件名字体色，日期用浅灰（通过 foreground 统一色，让换行后的第二行更淡）
         item.setForeground(0, QtGui.QBrush(QtGui.QColor("#E9EEF5")))
         item.setData(0, QtCore.Qt.ItemDataRole.UserRole, note.id)
+        item.setData(0, QtCore.Qt.ItemDataRole.UserRole + 1, note.title)
         item.setToolTip(0, f"{Path(note.title).name}  #{note.id}  {note.updated_at}")
         return item
 
@@ -1424,6 +1690,10 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 continue
             if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
                 continue
+            if isinstance(item_id, str) and item_id.startswith(IPC_FILE_PREFIX):
+                continue
+            if isinstance(item_id, str) and item_id.startswith(IPC_FILE_PREFIX):
+                continue
             if isinstance(item_id, str) and item_id.startswith(SERVER_LOG_PREFIX):
                 continue
             if isinstance(item_id, str) and (
@@ -1440,6 +1710,21 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     def _select_external_file(self, file_path: str) -> bool:
         target = f"{EXTERNAL_FILE_PREFIX}{file_path}"
+        if self._notes_tree_mode and self.notes_tree is not None:
+            item = self._find_tree_item_by_user_role(target)
+            if item is not None:
+                self.notes_tree.setCurrentItem(item)
+                return True
+            return False
+        for i in range(self.notes_list.count()):
+            item = self.notes_list.item(i)
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == target:
+                self.notes_list.setCurrentRow(i)
+                return True
+        return False
+
+    def _select_ipc_file(self, file_path: str) -> bool:
+        target = f"{IPC_FILE_PREFIX}{file_path}"
         if self._notes_tree_mode and self.notes_tree is not None:
             item = self._find_tree_item_by_user_role(target)
             if item is not None:
@@ -1582,34 +1867,41 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _on_selection_changed_inner(self) -> None:
         items = self._selected_note_items()
         item_id = self._selected_item_id()
-        self.append_debug_log(f"选择切换: item_id={item_id!r}, selected={len(items)}")
+        builtins.print(f"选择切换: item_id={item_id!r}, selected={len(items)}")
         if item_id == ASK_AI_ITEM_ID:
             if not self._initializing and self.state.current_note_id is not None:
                 self._auto_save_note("切换到问AI前", detail_ui=True)
-            self.append_debug_log("切换到 AI 模式")
+            builtins.print("切换到 AI 模式")
             self._set_ai_editor(self._current_ai_session_id)
             # AI 会话不再在列表中显示，不需要选择
             return
         # AI 会话不再在列表中，不再处理 ASK_AI_SESSION_PREFIX
 
         if self.state.dirty:
-            self.append_debug_log("切换到普通笔记/外部文件前触发自动保存")
+            builtins.print("切换到普通笔记/外部文件前触发自动保存")
             self._auto_save_note("切换日志前", detail_ui=True)
 
         if not items:
-            self.append_log("未选中任何条目，切换到空编辑器")
+            print("未选中任何条目，切换到空编辑器")
             self._set_editor(None)
             return
 
         self._ask_ai_mode = False
         item_id = self._selected_item_id()
         if isinstance(item_id, str) and item_id.startswith(EXTERNAL_FILE_PREFIX):
-            self.append_log(f"切换到外部文件: {item_id[len(EXTERNAL_FILE_PREFIX):]}")
+            print(f"切换到外部文件: {item_id[len(EXTERNAL_FILE_PREFIX):]}")
+            self._current_ipc_file = None
             self._set_external_file_editor(item_id[len(EXTERNAL_FILE_PREFIX):])
+            return
+        if isinstance(item_id, str) and item_id.startswith(IPC_FILE_PREFIX):
+            print(f"切换到 IPC 文件: {item_id[len(IPC_FILE_PREFIX):]}")
+            self._current_external_file = None
+            self._current_ipc_file = item_id[len(IPC_FILE_PREFIX):]
+            self._set_external_file_editor(self._current_ipc_file)
             return
         if isinstance(item_id, str) and item_id.startswith(SERVER_LOG_PREFIX):
             log_path = item_id[len(SERVER_LOG_PREFIX):]
-            self.append_log(f"切换到服务器日志: {log_path}")
+            print(f"切换到服务器日志: {log_path}")
             self._set_server_log_editor(log_path)
             return
         if isinstance(item_id, str) and (
@@ -1624,7 +1916,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         except ApiError as e:
             self._show_error(str(e))
             return
-        self.append_log(f"切换到普通笔记: #{note.id} {note.title}")
+        print(f"切换到普通笔记: #{note.id} {note.title}")
         self._set_editor(note)
         self._last_open_note_id = note.id
         self._save_settings()
@@ -1670,8 +1962,126 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
         self.state.dirty = False
         self.status.showMessage(f"已保存：#{note.id}", 2500)
+        self._record_version("note", str(note.id), note.title, content)
         self.refresh_notes()
         self._update_title()
+
+    # ===== 版本历史 =====
+
+    def _current_version_context(self) -> tuple[str | None, str | None, str]:
+        """返回当前编辑内容的版本上下文 (kind, ref, title)。
+
+        仅「普通笔记」与「服务器日志」支持版本历史，其余返回 (None, None, "")。
+        """
+        if self._ask_ai_mode or self._current_external_file:
+            return None, None, ""
+        if self._current_server_log_path:
+            log_path = self._current_server_log_path
+            return "log", log_path, PurePosixPath(log_path).name
+        if self.state.current_note_id is not None:
+            return "note", str(self.state.current_note_id), self.title_edit.text().strip()
+        return None, None, ""
+
+    def _record_version(self, kind: str, ref: str, title: str, content: str) -> None:
+        """保存成功后记录一个历史版本（内容无变化时自动跳过）。"""
+        try:
+            history_store.add_version(kind, ref, title, content)
+        except Exception as exc:
+            print(f"[l_notepad] WARN: 记录版本历史失败: {exc}")
+
+    def _populate_version_combo(self) -> None:
+        """展开版本下拉框前，重新拉取当前内容的历史版本列表。"""
+        combo = getattr(self, "combo_version", None)
+        if not self._qt_is_valid(combo):
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        kind, ref, _title = self._current_version_context()
+        if not kind or not ref:
+            combo.addItem("当前内容不支持版本历史", None)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            return
+        # 切换到不同内容时，清除上次选中的版本记录
+        ref_key = f"{kind}:{ref}"
+        if getattr(self, "_version_combo_ref", None) != ref_key:
+            self._version_combo_ref = ref_key
+            self._current_version_id = None
+        try:
+            versions = history_store.list_versions(kind, ref)
+        except Exception as exc:
+            combo.addItem(f"读取版本历史失败：{exc}", None)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            return
+        if not versions:
+            combo.addItem("暂无历史版本", None)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            return
+        total = len(versions)
+        for i, v in enumerate(versions):
+            num = total - i  # 最早=v1，最新=vN
+            label = f"v{num} · {v['saved_at']} · {v['length']}字"
+            if i == 0:
+                label += "（最新）"
+            if v["preview"]:
+                label += f" | {v['preview']}"
+            combo.addItem(label, v["id"])
+        # 选中当前已应用的版本，使下拉框显示「第几版」
+        target_index = 0
+        current_id = getattr(self, "_current_version_id", None)
+        if current_id is not None:
+            for idx in range(combo.count()):
+                if combo.itemData(idx) == current_id:
+                    target_index = idx
+                    break
+        combo.setCurrentIndex(target_index)
+        combo.blockSignals(False)
+
+    def _on_version_combo_activated(self, index: int) -> None:
+        """选中某个历史版本后载入其内容。"""
+        combo = getattr(self, "combo_version", None)
+        if not self._qt_is_valid(combo):
+            return
+        version_id = combo.itemData(index)
+        if version_id is None:
+            return
+        self._current_version_id = int(version_id)
+        self._apply_version(int(version_id))
+        # 保持当前选中项，使下拉框显示「第几版」
+
+    def _sync_version_combo_on_open(self) -> None:
+        """切换笔记/日志/其它内容时刷新版本下拉框，并默认选中最新版本。"""
+        combo = getattr(self, "combo_version", None)
+        if not self._qt_is_valid(combo):
+            return
+        kind, ref, _title = self._current_version_context()
+        ref_key = f"{kind}:{ref}" if (kind and ref) else None
+        self._version_combo_ref = ref_key
+        # 刚载入的内容即该内容的最新版本
+        self._current_version_id = None
+        if kind and ref:
+            try:
+                versions = history_store.list_versions(kind, ref)
+                if versions:
+                    self._current_version_id = versions[0]["id"]
+            except Exception:
+                pass
+        self._populate_version_combo()
+
+    def _apply_version(self, version_id: int) -> None:
+        """把指定版本的内容载入编辑器（标记为已修改，需手动保存以生效）。"""
+        version = history_store.get_version(version_id)
+        if version is None:
+            self.status.showMessage("该版本不存在", 3000)
+            return
+        self.content_edit.setPlainText(version["content"])
+        self.state.dirty = True
+        self._update_title()
+        self.status.showMessage(
+            f"已载入版本 {version['saved_at']}，保存后生效", 3000
+        )
 
     @staticmethod
     def _format_file_size(num_bytes: int) -> str:
@@ -1752,7 +2162,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 msg = f"{reason} 自动保存失败：{filename} | 大小 {size_text} | {date_text} | {err}"
                 timeout = 5000
             self.status.showMessage(msg, timeout)
-            self.append_log(msg)
+            print(msg)
 
         if notify_tray:
             if ok:
@@ -1784,10 +2194,10 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if self.state.current_note_id is None:
             return
         if not self._qt_is_valid(getattr(self, "title_edit", None)):
-            self.append_log(f"{reason} 自动保存跳过：title_edit 已失效")
+            print(f"{reason} 自动保存跳过：title_edit 已失效")
             return
         if not self._qt_is_valid(getattr(self, "content_edit", None)):
-            self.append_log(f"{reason} 自动保存跳过：content_edit 已失效")
+            print(f"{reason} 自动保存跳过：content_edit 已失效")
             return
         title = self.title_edit.text().strip() or "未命名"
         content = self._get_content_text()
@@ -1805,7 +2215,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 )
             else:
                 self.status.showMessage(f"自动保存失败：{e}", 5000)
-                self.append_log(f"{reason} 自动保存失败：{e}")
+                print(f"{reason} 自动保存失败：{e}")
             return
 
         self.state.current_note_id = note.id
@@ -1834,7 +2244,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             )
         else:
             self.status.showMessage(f"{reason} 已自动保存：#{note.id}", 2500)
-            self.append_log(f"{reason} 自动保存日志文件：#{note.id}")
+            print(f"{reason} 自动保存日志文件：#{note.id}")
 
     def _delete_note(self) -> None:
         if self._ask_ai_mode:
@@ -1906,17 +2316,15 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             encoding="utf-8",
         )
 
-    def _ensure_open_file_tab(self) -> None:
-        """在顶层 tabs 末尾添加「+ 打开文件」占位标签（需在其它动态标签插入之后调用）。"""
-        if self.tabs is None:
-            return
-        for i in range(self.tabs.count() - 1, -1, -1):
-            widget = self.tabs.widget(i)
-            if widget is not None and widget.objectName() == "_open_file_holder":
-                return
-        holder = QtWidgets.QWidget()
-        holder.setObjectName("_open_file_holder")
-        self.tabs.addTab(holder, "+ 打开文件")
+    def add_ipc_file(self, file_path: str) -> None:
+        file_path = str(Path(file_path))
+        if file_path not in self._ipc_files:
+            self._ipc_files.insert(0, file_path)
+        self._current_ipc_file = file_path
+        self._current_external_file = None
+        self._save_external_files_state()
+        self.refresh_notes()
+        self._select_ipc_file(file_path)
 
     def _open_external_file(self) -> None:
         if self.state.dirty and not self._confirm_discard():
@@ -1985,7 +2393,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         """销毁旧的右侧面板并新建 RightPanel 实例。"""
         splitter = self.findChild(QtWidgets.QSplitter, "splitter_main")
         if splitter is None:
-            self.append_log("警告: 重建右侧面板时找不到 splitter_main，跳过")
+            print("警告: 重建右侧面板时找不到 splitter_main，跳过")
             return
 
         # 移除当前右侧面板（含旧 RightPanel 及其全部子控件）
@@ -2034,30 +2442,6 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.content_edit.editor().textChanged.connect(self._mark_dirty)
         self.content_edit.editor().textChanged.connect(self._update_realtime_token_stats)
 
-        # 「打开文件」作为顶层标签栏（主界面/帮助/日志）末尾的按钮式标签
-        if not self._qt_is_valid(getattr(self, "btn_open_external_file", None)):
-            self.btn_open_external_file = QtWidgets.QPushButton("+ 打开文件")
-            self.btn_open_external_file.setObjectName("OpenFileTabButton")
-            self.btn_open_external_file.setStyleSheet(
-                """QPushButton#OpenFileTabButton {
-                    padding: 3px 12px;
-                    font-size: 12px;
-                    border: 1px solid rgba(137, 221, 255, 0.25);
-                    border-radius: 8px;
-                    background: rgba(255,255,255,0.04);
-                    color: #89DDFF;
-                    margin: 0 4px;
-                }
-                QPushButton#OpenFileTabButton:hover {
-                    background: rgba(77, 163, 255, 0.18);
-                    border-color: rgba(77, 163, 255, 0.55);
-                }
-                QPushButton#OpenFileTabButton:pressed {
-                    background: rgba(77, 163, 255, 0.28);
-                }"""
-            )
-            self.btn_open_external_file.clicked.connect(self._open_external_file)
-
 
         self.btn_save.setObjectName("PrimaryButton")
         self.btn_ai_ask.setObjectName("PrimaryButton")
@@ -2070,6 +2454,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.btn_refresh.clicked.connect(self.refresh_notes)
         self.btn_favorite.clicked.connect(self._toggle_favorite_current)
         self.btn_ai_ask.clicked.connect(self._ask_ai)
+        self.combo_version.aboutToShowPopup.connect(self._populate_version_combo)
+        self.combo_version.activated.connect(self._on_version_combo_activated)
 
         # 编辑器事件过滤
         for editor_widget in (self.content_edit, self.ai_answer_edit):
@@ -2096,7 +2482,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             return
         if self.tabs.currentIndex() != main_index:
             self.tabs.setCurrentIndex(main_index)
-            self.append_log(f"已切回主界面页: reason={reason}, index={main_index}")
+            print(f"已切回主界面页: reason={reason}, index={main_index}")
 
     def _set_right_panel_mode(self, mode: str) -> None:
         """统一切换右侧主编辑区域，避免 AI/普通笔记/外部文件状态残留。"""
@@ -2110,11 +2496,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if ai_tabs_valid:
             self.ai_tabs.setVisible(is_ai)
         elif is_ai:
-            self.append_log("警告: ai_tabs 已失效，无法显示 AI 面板")
+            print("警告: ai_tabs 已失效，无法显示 AI 面板")
         if content_valid:
             self.content_edit.setVisible(is_editor)
         else:
-            self.append_log("警告: content_edit 已失效，无法显示普通笔记面板")
+            print("警告: content_edit 已失效，无法显示普通笔记面板")
         if answer_valid:
             self.ai_answer_edit.hide()
         if is_ai and ai_tabs_valid:
@@ -2123,7 +2509,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._raise_content_editor_surface()
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         parent = self.content_edit.parentWidget() if content_valid else None
-        self.append_log(
+        print(
             "右侧面板切换: "
             f"mode={mode}, current_tab={self.tabs.currentIndex() if self._qt_is_valid(getattr(self, 'tabs', None)) else -1}, "
             f"ai_tabs_valid={ai_tabs_valid}, "
@@ -2152,11 +2538,13 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                     preview_view.show()
                     preview_view.raise_()
         except Exception as exc:
-            self.append_debug_log(f"Markdown 预览层置顶跳过: {exc!r}")
+            builtins.print(f"Markdown 预览层置顶跳过: {exc!r}")
 
     def _set_ai_controls_visible(self, visible: bool) -> None:
         """统一切换 AI 顶部/状态栏相关控件可见性。"""
         widgets = (
+            self.title_edit,
+            self.tab_count,
             self.provider_combo,
             self.label_model,
             self.model_combo,
@@ -2178,9 +2566,15 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 continue
             widget.setVisible(visible)
             changed += 1
+        # 切换版本按钮：仅非问AI面板显示
+        # 版本下拉框与标签：仅非问AI面板显示
+        if self._qt_is_valid(getattr(self, "combo_version", None)):
+            self.combo_version.setVisible(not visible)
+        if self._qt_is_valid(getattr(self, "label_version", None)):
+            self.label_version.setVisible(not visible)
         if skipped:
-            self.append_log(f"AI 控件可见性跳过已失效控件: {', '.join(skipped)}")
-        self.append_log(f"AI 控件可见性: {visible}, changed={changed}")
+            print(f"AI 控件可见性跳过已失效控件: {', '.join(skipped)}")
+        print(f"AI 控件可见性: {visible}, changed={changed}")
 
     def _set_external_file_editor(self, file_path: str) -> None:
         path = Path(file_path)
@@ -2212,6 +2606,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.state.dirty = False
         self._save_external_files_state()
         self._update_title()
+        self._log_file_path_label.setText(f"日志路径: {path}")
+        self._log_file_path_label.setToolTip(str(path))
+        self._sync_version_combo_on_open()
 
     # ===== 服务器日志文件浏览（通过 API 获取） =====
 
@@ -2225,40 +2622,35 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         except Exception as e:
             msg = f"获取服务器日志列表失败: {e}"
             print(f"[l_notepad] ERROR: {msg}")
-            # 注意：不在这里调用 self.append_log()，因为可能在后台线程
+            # 注意：不在这里调用 print()，因为可能在后台线程
             return [], msg
     
+    def _filter_and_sort_logs(self, logs: list, query: str = "") -> list:
+        """按查询本地过滤并按 mtime 倒序（最新在上）排序。"""
+        q = (query or "").strip().lower()
+        if q:
+            logs = [log for log in logs if q in log.path.lower()]
+
+        def _key(log):
+            try:
+                return datetime.fromisoformat(log.mtime)
+            except (ValueError, TypeError):
+                return datetime.min
+
+        return sorted(logs, key=_key, reverse=True)
+
+    def _log_mtime_for(self, log_path: str) -> str | None:
+        for log in getattr(self, "_server_logs_cache", None) or []:
+            if log.path == log_path:
+                return log.mtime
+        return None
+
     def _fetch_server_logs_async(self, query: str = "") -> None:
-        """异步获取服务器日志列表并更新 UI。"""
-        from PySide6.QtCore import QThread
-        
-        # 在后台线程中获取日志
-        def _worker():
-            logs, error_msg = self._fetch_server_logs()
-            if query and logs:
-                logs = [log for log in logs if query.lower() in log.path.lower()]
-            return logs, error_msg
-        
-        # 使用 QThread 运行
-        thread = QThread()
-        worker = type('_Worker', (), {'run': _worker})()
-        worker.moveToThread(thread)
-        
-        def _on_finished():
-            logs, error_msg = _worker()
-            thread.quit()
-            thread.wait()
-            # 在主线程中更新 UI
-            self._update_server_log_list(logs, error_msg)
-        
-        thread.started.connect(lambda: None)  # 占位
-        thread.finished.connect(_on_finished)
-        
-        # 简单方式：直接在后台线程执行
+        """后台获取服务器日志全量列表并缓存、刷新 UI。query 仅作占位，过滤在渲染时本地完成。"""
         import threading
+
         def _run_in_background():
-            logs, error_msg = _worker()
-            # 使用 QMetaObject.invokeMethod 回到主线程更新 UI
+            logs, error_msg = self._fetch_server_logs()
             QtCore.QMetaObject.invokeMethod(
                 self,
                 "_update_server_log_list",
@@ -2266,16 +2658,21 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 QtCore.Q_ARG(list, logs),
                 QtCore.Q_ARG(str, error_msg or ""),
             )
-        
+
         threading.Thread(target=_run_in_background, daemon=True).start()
 
     def _add_server_log_files_to_tree(
         self, tree: QtWidgets.QTreeWidget, query: str = ""
     ) -> None:
         """在文件树中添加服务器日志虚拟文件夹。"""
-        logs, error_msg = self._fetch_server_logs()
-        if query and logs:
-            logs = [log for log in logs if query.lower() in log.path.lower()]
+        cache = getattr(self, "_server_logs_cache", None)
+        if cache is not None:
+            logs, error_msg = cache, None
+        else:
+            logs, error_msg = self._fetch_server_logs()
+            if not error_msg:
+                self._server_logs_cache = list(logs)
+        logs = self._filter_and_sort_logs(logs, query)
 
         # 始终显示文件夹，即使为空或失败
         log_folder = QtWidgets.QTreeWidgetItem(["\u25be \U0001f4cb \u670d\u52a1\u5668\u65e5\u5fd7"])
@@ -2390,7 +2787,13 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         )
         folder_header.setSizeHint(QtCore.QSize(0, 28))
         self.notes_list.addItem(folder_header)
-        
+
+        # 已有缓存则本地即时过滤渲染，避免每次输入都发起网络请求
+        cache = getattr(self, "_server_logs_cache", None)
+        if cache is not None:
+            self._render_server_log_items(cache, query)
+            return
+
         # 显示加载中的提示
         loading_item = QtWidgets.QListWidgetItem("  \U0001f504 \u6b63\u5728\u52a0\u8f7d\u670d\u52a1\u5668\u65e5\u5fd7\u5217\u8868...")
         loading_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
@@ -2421,7 +2824,15 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             err_item.setSizeHint(QtCore.QSize(0, 28))
             self.notes_list.addItem(err_item)
             return
-        
+
+        # 缓存全量列表，后续输入过滤纯本地完成
+        self._server_logs_cache = list(logs)
+        query = self.search_edit.text().strip() if self._qt_is_valid(getattr(self, "search_edit", None)) else ""
+        self._render_server_log_items(logs, query)
+
+    def _render_server_log_items(self, logs: list, query: str = "") -> None:
+        """把日志条目渲染进 notes_list（本地过滤 + mtime 倒序）。"""
+        logs = self._filter_and_sort_logs(logs, query)
         if not logs:
             # 显示空提示
             empty_item = QtWidgets.QListWidgetItem("  \U0001f4c2 \u672a\u627e\u5230\u670d\u52a1\u5668\u65e5\u5fd7")
@@ -2451,6 +2862,57 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             )
             self.notes_list.addItem(item)
 
+    def set_console_log_path(self, log_path: str) -> None:
+        self._console_log_path = log_path
+        self._log_file_path_label.setText(f"日志路径: {log_path}")
+        self._log_file_path_label.setToolTip(log_path)
+        self._start_console_log_tail()
+
+    def _start_console_log_tail(self) -> None:
+        if not self._console_log_path:
+            return
+        if getattr(self, "_console_log_tailer", None) is not None:
+            return
+        self._console_log_offset = 0
+        self._console_log_buffer = ""
+        self._console_log_tailer = QtCore.QTimer(self)
+        self._console_log_tailer.setInterval(300)
+        self._console_log_tailer.timeout.connect(self._poll_console_log)
+        self._console_log_tailer.start()
+
+    def _poll_console_log(self) -> None:
+        if not self._console_log_path:
+            return
+        path = Path(self._console_log_path)
+        if not path.exists():
+            return
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                f.seek(getattr(self, "_console_log_offset", 0))
+                chunk = f.read()
+                self._console_log_offset = f.tell()
+        except Exception:
+            return
+        if not chunk:
+            return
+        self._console_log_buffer += chunk
+        while "\n" in self._console_log_buffer:
+            line, self._console_log_buffer = self._console_log_buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            if line:
+                self._append_console_line(line)
+
+    def _append_console_line(self, line: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        if self._qt_is_valid(getattr(self, "log_view", None)):
+            self.log_view.append_text_update_cache(
+                f"[{ts}] {line}\n",
+                LOG_VIEW_CONTENT_CACHE_KEY,
+            )
+            scrollbar = self.log_view.verticalScrollBar()
+            if scrollbar:
+                scrollbar.setValue(scrollbar.maximum())
+
     def _set_server_log_editor(self, log_path: str) -> None:
         """通过 API 打开服务器日志文件（可编辑）。"""
         self._ask_ai_mode = False
@@ -2458,12 +2920,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._current_external_file = None
         self._current_server_log_path = log_path
         self.state.current_note_id = None
-        try:
-            data = self.api.get_log(log_path)
-            content = data.get("content", "")
-        except Exception as e:
-            print(f"[l_notepad] ERROR: 获取日志文件失败: {e}")
-            self._show_error(f"\u83b7\u53d6\u65e5\u5fd7\u6587\u4ef6\u5931\u8d25\uff1a{e}")
+        content = self._get_log_content_cached(log_path)
+        if content is None:
             return
         file_name = PurePosixPath(log_path).name
         mode = self._mode_from_filename(file_name)
@@ -2483,9 +2941,137 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._auto_set_highlight_mode(file_name)
         self.state.dirty = False
         self._update_title()
-        # 状态栏显示日志路径
-        base_url = self._get_log_server_url()
-        self.status.showMessage(f"日志: {base_url}/api/logs/{log_path}" if base_url else f"日志: {log_path}", 0)
+        # 更新日志路径标签并启动服务器日志实时跟随
+        self._log_file_path_label.setText(f"日志路径: {log_path}")
+        self._log_file_path_label.setToolTip(log_path)
+        self._start_server_log_tail(log_path)
+        self._sync_version_combo_on_open()
+
+    def _get_log_content_cached(self, log_path: str) -> str | None:
+        """按 mtime 缓存日志内容；命中则免网络。失败返回 None（已弹错误）。"""
+        mtime = self._log_mtime_for(log_path)
+        cache = getattr(self, "_log_content_cache", None)
+        if cache is None:
+            cache = {}
+            self._log_content_cache = cache
+        hit = cache.get(log_path)
+        if hit is not None and mtime is not None and hit[0] == mtime:
+            return hit[1]
+        try:
+            data = self.api.get_log(log_path)
+            content = data.get("content", "")
+        except Exception as e:
+            print(f"[l_notepad] ERROR: 获取日志文件失败: {e}")
+            self._show_error(f"\u83b7\u53d6\u65e5\u5fd7\u6587\u4ef6\u5931\u8d25\uff1a{e}")
+            return None
+        cache[log_path] = (mtime, content)
+        return content
+
+    def _invalidate_log_content_cache(self, log_path: str) -> None:
+        cache = getattr(self, "_log_content_cache", None)
+        if cache:
+            cache.pop(log_path, None)
+
+    def _reload_server_logs(self) -> None:
+        """强制清缓存并重新拉取服务器日志列表。"""
+        self._server_logs_cache = None
+        self._log_content_cache = {}
+        self.refresh_notes()
+
+    # ===== 服务器日志实时跟随（tail） =====
+
+    def _start_server_log_tail(self, log_path: str) -> None:
+        self._stop_server_log_tail()
+        self._server_log_tail_path = log_path
+        self._server_log_tail_busy = False
+        timer = QtCore.QTimer(self)
+        timer.setInterval(2000)
+        timer.timeout.connect(self._poll_server_log_tail)
+        timer.start()
+        self._server_log_tailer = timer
+
+    def _stop_server_log_tail(self) -> None:
+        timer = getattr(self, "_server_log_tailer", None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._server_log_tailer = None
+        self._server_log_tail_path = None
+
+    def _poll_server_log_tail(self) -> None:
+        import threading
+        path = getattr(self, "_server_log_tail_path", None)
+        if not path or self._current_server_log_path != path:
+            self._stop_server_log_tail()
+            return
+        if getattr(self, "_server_log_tail_busy", False):
+            return
+        if self.state.dirty:  # 用户正在编辑，不覆盖
+            return
+        self._server_log_tail_busy = True
+
+        def _work():
+            try:
+                data = self.api.get_log(path)
+                content = data.get("content", "")
+            except Exception:
+                content = None
+            QtCore.QMetaObject.invokeMethod(
+                self,
+                "_apply_server_log_tail",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(str, path),
+                QtCore.Q_ARG(str, content if content is not None else "\x00"),
+            )
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    @QtCore.Slot(str, str)
+    def _apply_server_log_tail(self, path: str, content: str) -> None:
+        self._server_log_tail_busy = False
+        if content == "\x00":  # 拉取失败
+            return
+        if self._current_server_log_path != path:
+            return
+        if self.state.dirty:
+            return
+        current = self._get_content_text()
+        if content == current:
+            return
+        sb = self.content_edit.verticalScrollBar()
+        at_bottom = sb is None or sb.value() >= sb.maximum() - 4
+        self.content_edit.blockSignals(True)
+        if content.startswith(current):
+            cursor = self.content_edit.textCursor()
+            self.content_edit.moveCursor(QtGui.QTextCursor.MoveOperation.End)
+            self.content_edit.insertPlainText(content[len(current):])
+            if not at_bottom:
+                self.content_edit.setTextCursor(cursor)
+        else:
+            self.content_edit.setPlainText(content)
+        self.content_edit.blockSignals(False)
+        self.state.dirty = False
+        self._invalidate_log_content_cache(path)
+        if at_bottom and sb is not None:
+            sb.setValue(sb.maximum())
+
+    def _maybe_autosave_log_on_leave(self) -> None:
+        """鼠标离开内容编辑区时，若正在编辑服务器日志且有改动则自动保存并生成版本。"""
+        if not self._current_server_log_path:
+            return
+        if not self.state.dirty:
+            return
+        if not self._qt_is_valid(getattr(self, "content_edit", None)):
+            return
+        # 排除编辑区内部移动（如滑到滚动条）导致的误触发：仅当光标确实在编辑区外
+        try:
+            local = self.content_edit.mapFromGlobal(QtGui.QCursor.pos())
+            if self.content_edit.rect().contains(local):
+                return
+        except Exception:
+            pass
+        self._save_server_log("离开编辑区")
+        self._sync_version_combo_on_open()
 
     def _save_server_log(
         self,
@@ -2503,12 +3089,14 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             print(f"[l_notepad] ERROR: 保存日志文件失败: {exc}")
             if reason:
                 self.status.showMessage(f"保存日志失败：{exc}", 5000)
-                self.append_log(f"保存日志失败：{exc}")
+                print(f"保存日志失败：{exc}")
             else:
                 self._show_error(f"保存日志文件失败：{exc}")
             return
         self.state.dirty = False
         self._update_title()
+        self._invalidate_log_content_cache(log_path)
+        self._record_version("log", log_path, file_name, content)
         if reason:
             self.status.showMessage(f"{reason} 已保存日志 {file_name}", 2500)
         else:
@@ -2540,7 +3128,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 )
             else:
                 self.status.showMessage(f"保存外部文件失败：{exc}", 5000)
-                self.append_log(f"保存外部文件失败：{exc}")
+                print(f"保存外部文件失败：{exc}")
             return
         self.state.dirty = False
         self._save_external_files_state()
@@ -2577,15 +3165,15 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._show_error(f"重启失败: {exc}")
 
     def _toggle_favorite_current(self) -> None:
-        self.append_log(
+        print(
             f"点击置顶/收藏: ask_ai_mode={self._ask_ai_mode}, current_note_id={self.state.current_note_id}, "
             f"current_external={self._current_external_file!r}"
         )
         if self._ask_ai_mode:
-            self.append_log("当前处于 AI 模式，忽略置顶/收藏切换")
+            print("当前处于 AI 模式，忽略置顶/收藏切换")
             return
         if self.state.current_note_id is None:
-            self.append_log("当前没有可置顶的笔记，忽略")
+            print("当前没有可置顶的笔记，忽略")
             return
         note_id = int(self.state.current_note_id)
         before = list(self._favorite_order)
@@ -2597,12 +3185,12 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             self._favorite_order.insert(0, note_id)
             self.status.showMessage("已置顶/收藏", 2000)
             action = "置顶"
-        self.append_log(f"置顶/收藏操作: note_id={note_id}, action={action}, before={before}, after={self._favorite_order}")
+        print(f"置顶/收藏操作: note_id={note_id}, action={action}, before={before}, after={self._favorite_order}")
         self._save_settings()
         self.refresh_notes()
         self._select_note_id(note_id)
         self._update_favorite_button_label()
-        self.append_log(f"置顶/收藏完成: button_text={self.btn_favorite.text()!r}")
+        print(f"置顶/收藏完成: button_text={self.btn_favorite.text()!r}")
 
     def _on_notes_rows_moved(self, *_args) -> None:
         if self._notes_tree_mode:
@@ -2680,45 +3268,45 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.state.dirty = False
 
         # 切换到 AI 模式：显示 ai_tabs，隐藏普通编辑器
-        self.append_log(f"进入 AI 模式，session_id={session_id!r}")
+        print(f"进入 AI 模式，session_id={session_id!r}")
         self._set_right_panel_mode("ai")
         # 先确保至少有一个可见 AI 标签页，避免右侧布局没有任何内容变化
         if self.ai_tabs.count() == 0:
-            self.append_log("AI 标签页当前为空，立即创建默认会话页")
+            print("AI 标签页当前为空，立即创建默认会话页")
             session = self._new_ai_session(select=True)
             self._current_ai_session_id = session.session_id
-            self.append_log(f"默认会话页已创建: {session.session_id} / {session.title}")
+            print(f"默认会话页已创建: {session.session_id} / {session.title}")
 
         session = None
         if session_id and session_id in self._ai_sessions:
             session = self._ai_sessions[session_id]
-            self.append_log(f"使用传入的 AI 会话: {session.session_id}")
+            print(f"使用传入的 AI 会话: {session.session_id}")
         elif self._current_ai_session_id and self._current_ai_session_id in self._ai_sessions:
             session = self._ai_sessions[self._current_ai_session_id]
-            self.append_log(f"使用当前 AI 会话: {session.session_id}")
+            print(f"使用当前 AI 会话: {session.session_id}")
         elif self.ai_tabs.count() > 0:
             tab_index = self.ai_tabs.currentIndex()
             if tab_index < 0:
                 tab_index = 0
             widget = self.ai_tabs.widget(tab_index)
             tab_session_id = widget.property("session_id") if widget else None
-            self.append_log(f"尝试从当前 AI 标签页获取会话: index={tab_index}, session_id={tab_session_id!r}")
+            print(f"尝试从当前 AI 标签页获取会话: index={tab_index}, session_id={tab_session_id!r}")
             if tab_session_id and tab_session_id in self._ai_sessions:
                 session = self._ai_sessions[tab_session_id]
         elif self._ai_sessions:
             session = self._sorted_ai_sessions()[0]
-            self.append_log(f"从已有 AI 会话中选取: {session.session_id}")
+            print(f"从已有 AI 会话中选取: {session.session_id}")
         if session is None:
-            self.append_log(f"未找到可复用 AI 会话，准备创建新会话；当前 sessions={len(self._ai_sessions)}, tabs={self.ai_tabs.count()}")
+            print(f"未找到可复用 AI 会话，准备创建新会话；当前 sessions={len(self._ai_sessions)}, tabs={self.ai_tabs.count()}")
             session = self._new_ai_session(select=True)
-            self.append_log(f"新建 AI 会话完成: {session.session_id} / {session.title}, tabs={self.ai_tabs.count()}")
+            print(f"新建 AI 会话完成: {session.session_id} / {session.title}, tabs={self.ai_tabs.count()}")
         self._current_ai_session_id = session.session_id
-        self.append_log(f"AI 当前会话: {session.session_id} / {session.title}")
-        self.append_log(f"AI 标签页数量: {self.ai_tabs.count()}")
-        self.append_log(f"AI tabs visible after select: {self.ai_tabs.isVisible()}")
-        self.append_log(f"当前 AI 标签页索引: {self.ai_tabs.currentIndex()}")
+        print(f"AI 当前会话: {session.session_id} / {session.title}")
+        print(f"AI 标签页数量: {self.ai_tabs.count()}")
+        print(f"AI tabs visible after select: {self.ai_tabs.isVisible()}")
+        print(f"当前 AI 标签页索引: {self.ai_tabs.currentIndex()}")
         if self.ai_tabs.count() == 0:
-            self.append_log("警告: AI 标签页数量为 0，尝试强制创建一个标签页")
+            print("警告: AI 标签页数量为 0，尝试强制创建一个标签页")
             self._create_ai_tab(session)
 
         # 检查是否已有对应 session 的标签页
@@ -2731,12 +3319,12 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
         if tab_index >= 0:
             # 切换到已有标签页
-            self.append_log(f"定位到 AI 标签页索引: {tab_index}")
+            print(f"定位到 AI 标签页索引: {tab_index}")
             self.ai_tabs.setCurrentIndex(tab_index)
             # 更新标签页内容
             self._update_ai_tab_content(session)
         else:
-            self.append_log(f"未找到AI标签页，不自动创建: {session.title}")
+            print(f"未找到AI标签页，不自动创建: {session.title}")
             self._update_ai_tab_count()
 
         self.title_edit.blockSignals(True)
@@ -2751,7 +3339,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._set_ai_controls_visible(True)
         self._update_title()
         self._update_realtime_token_stats()
-        self.append_log("AI 模式切换完成")
+        print("AI 模式切换完成")
 
     def _update_ai_tab_content(self, session: AiSession) -> None:
         """更新指定会话的标签页内容"""
@@ -2800,6 +3388,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._active_ai_request_id = request_id
         session.in_flight = True
         session.streaming_text = ""
+        session.reasoning_text = ""
         session.draft_prompt = prompt
         self.btn_ai_ask.setEnabled(False)
         self.btn_ai_ask.setText("请求中...")
@@ -2812,7 +3401,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             _set_code_editor_document(answer_edit, self._render_ai_session_text(session))
         self._update_token_labels()
         self.status.showMessage(f"正在请求模型：{model}", 2500)
-        self.append_log(f"问AI请求已发送，模型：{model}，会话：{session.title}")
+        print(f"问AI请求已发送，模型：{model}，会话：{session.title}")
 
         def _worker() -> None:
             history = session.messages[-20:] if session.messages else []
@@ -2847,7 +3436,10 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                         except Exception:
                             continue
                         delta = data.get("choices", [{}])[0].get("delta", {})
-                        chunk = str(delta.get("content", ""))
+                        reasoning = delta.get("reasoning_content") or ""
+                        if reasoning:
+                            self._ai_bridge.reasoning_chunk.emit(request_id, session.session_id, reasoning)
+                        chunk = delta.get("content") or ""
                         if chunk:
                             chunks.append(chunk)
                             self._ai_bridge.chunk.emit(request_id, session.session_id, chunk)
@@ -2917,7 +3509,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         label_output = self._get_right_widget("label_output_tokens", expected_type=QtWidgets.QLabel)
         label_cost = self._get_right_widget("label_cost", expected_type=QtWidgets.QLabel)
         if not (self._qt_is_valid(label_input) and self._qt_is_valid(label_output) and self._qt_is_valid(label_cost)):
-            self.append_log("token label 已失效，跳过更新")
+            print("token label 已失效，跳过更新")
             return
         label_input.setText(f"输入: {self._ai_input_tokens} tokens")
         label_output.setText(f"输出: {self._ai_output_tokens} tokens")
@@ -2949,7 +3541,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._settings.setValue("ai/provider", provider_name)
         self._settings.sync()
         self._update_model_list_for_provider(provider_name)
-        self.append_log(f"AI提供商已切换：{provider_name}")
+        print(f"AI提供商已切换：{provider_name}")
 
     def _on_ai_model_changed(self, model: str) -> None:
         model = model.strip()
@@ -2958,7 +3550,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._selected_ai_model = model
         self._settings.setValue("ai/model", model)
         self._settings.sync()
-        self.append_log(f"AI模型已选择：{model}")
+        print(f"AI模型已选择：{model}")
 
     def _refresh_ai_models(self) -> None:
         provider_name = self.provider_combo.currentText()
@@ -3008,7 +3600,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.btn_refresh_models.setText("刷新模型")
         if not ok:
             self.status.showMessage("读取模型列表失败", 5000)
-            self.append_log(f"读取模型列表失败：{payload}")
+            print(f"读取模型列表失败：{payload}")
             return
         if isinstance(payload, dict):
             raw_models = payload.get("models", [])
@@ -3029,7 +3621,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.model_combo.blockSignals(False)
         self._on_ai_model_changed(self.model_combo.currentText())
         self.status.showMessage(f"已读取 {len(models)} 个模型", 3000)
-        self.append_log(f"硅基模型列表已刷新：{len(models)} 个")
+        print(f"硅基模型列表已刷新：{len(models)} 个")
         self._update_token_labels()
 
     def _extract_price_from_model_item(self, item: dict) -> ModelPrice | None:
@@ -3064,7 +3656,34 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             return None
         return ModelPrice(input_per_m=input_value, output_per_m=output_value)
 
+    def _init_account_favorites(self) -> None:
+        """初始化账号收藏标签页"""
+        # 查找或创建账号收藏组件
+        self._account_favorites_panel = self.findChild(AccountFavoritesPanel, "tab_account_favorites")
+        if self._account_favorites_panel is None:
+            self._account_favorites_panel = AccountFavoritesPanel(self)
+        
+        # 将组件添加到标签页（如果还没有添加）
+        if hasattr(self, 'tabs') and self.tabs:
+            # 查找账号收藏标签页的索引
+            account_tab_index = -1
+            for i in range(self.tabs.count()):
+                widget = self.tabs.widget(i)
+                if widget is self._account_favorites_panel:
+                    account_tab_index = i
+                    break
+            
+            # 如果还没有添加，插入到合适的位置（例如在文件夹收藏之后）
+            if account_tab_index < 0:
+                # 找到文件夹收藏标签页的位置
+                insert_index = 2  # 默认插入到第3个位置
+                if hasattr(self, '_folder_favorites_tab_index') and self._folder_favorites_tab_index >= 0:
+                    insert_index = self._folder_favorites_tab_index + 1
+                
+                self.tabs.insertTab(insert_index, self._account_favorites_panel, "👤 账号收藏")
+    
     def _refresh_official_prices(self) -> None:
+        """刷新硅基流动官方模型价格"""
         def _worker() -> None:
             try:
                 req = urllib.request.Request(SILICONFLOW_PRICING_URL, method="GET")
@@ -3103,17 +3722,37 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     def _on_prices_loaded(self, ok: bool, payload: object) -> None:
         if not self._qt_is_valid(getattr(self, "label_price_source", None)):
-            self.append_log(f"价格控件已失效，跳过更新：ok={ok}, payload={payload!r}")
+            print(f"价格控件已失效，跳过更新：ok={ok}, payload={payload!r}")
             return
         if not ok:
             self.label_price_source.setText("价格: 官网读取失败")
-            self.append_log(f"官网价格读取失败：{payload}")
+            print(f"官网价格读取失败：{payload}")
             return
         if isinstance(payload, dict):
             self._model_prices.update(payload)
         self.label_price_source.setText(f"价格: 硅基官网 {len(self._model_prices)} 个")
-        self.append_log(f"已从硅基官网读取价格：{len(self._model_prices)} 个")
+        print(f"已从硅基官网读取价格：{len(self._model_prices)} 个")
         self._update_token_labels()
+
+    def _hide_thinking_block(self, answer_edit) -> None:
+        """回答结束后自动折叠 <思考过程>...</思考过程> 行块（含标记行）。
+        折叠后行号区显示 ▶ N行 指示器，单击可展开。"""
+        try:
+            inner = answer_edit.editor()
+        except AttributeError:
+            return
+        lines = inner.toPlainText().split("\n")
+        start_line: int | None = None
+        end_line: int | None = None
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped == "<思考过程>" and start_line is None:
+                start_line = i
+            elif stripped == "</思考过程>" and start_line is not None:
+                end_line = i
+                break
+        if start_line and end_line:
+            inner.hide_lines(start_line, end_line)
 
     def _on_ai_finished(self, request_id: int, session_id: str, ok: bool, message: str, prompt: str) -> None:
         session = self._ai_sessions.get(session_id)
@@ -3145,6 +3784,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                     _set_code_editor_document(
                         answer_edit, self._render_ai_session_text(session)
                     )
+                    # 回答完毕后折叠思考过程
+                    self._hide_thinking_block(answer_edit)
         else:
             session.streaming_text = f"{prefix}:\n{message}"
             if self._current_ai_session_id == session_id:
@@ -3155,7 +3796,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                     )
         self._update_token_labels()
         self.status.showMessage(prefix, 3500)
-        self.append_log(f"{prefix}（{session.title}）")
+        print(f"{prefix}（{session.title}）")
         self._save_settings()
 
     def _on_ai_chunk(self, request_id: int, session_id: str, chunk: str) -> None:
@@ -3179,10 +3820,29 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                 answer_edit.setTextCursor(cursor)
             self._update_token_labels()
 
+    def _on_ai_reasoning_chunk(self, request_id: int, session_id: str, chunk: str) -> None:
+        """流式推理内容（reasoning_content）累积并刷新显示。"""
+        if request_id != self._active_ai_request_id:
+            return
+        session = self._ai_sessions.get(session_id)
+        if session is None:
+            return
+        session.reasoning_text += chunk
+        if self._current_ai_session_id == session_id:
+            answer_edit = self._get_ai_tab_answer_edit(session_id)
+            if answer_edit:
+                _set_code_editor_document(
+                    answer_edit, self._render_ai_session_text(session)
+                )
+                cursor = answer_edit.textCursor()
+                cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+                answer_edit.setTextCursor(cursor)
+
     def _set_editor(self, note: NoteDto | None) -> None:
         self._ask_ai_mode = False
         self._current_ai_session_id = None
         self._current_external_file = None
+        self._current_ipc_file = None
         self._current_server_log_path = None
         self._set_right_panel_mode("empty" if note is None else "note")
         if self._qt_is_valid(getattr(self, "ai_answer_edit", None)):
@@ -3208,14 +3868,14 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         expected_content = ""
         try:
             if note is None:
-                self.append_log("准备刷新右侧内容: 空编辑器")
+                print("准备刷新右侧内容: 空编辑器")
                 if title_edit_valid:
                     title_edit_widget.setText("")
                 if content_edit_valid:
                     content_edit_widget.clear()
                 self.state.current_note_id = None
             else:
-                self.append_log(
+                print(
                     "准备刷新右侧内容: "
                     f"note_id={note.id}, title={note.title!r}, api_chars={len(note.content or '')}"
                 )
@@ -3226,7 +3886,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                     mode = self._mode_from_filename(note.title)
                     loaded = content_edit_widget.load_text_file_cached(note_path, mode=mode)
                     expected_content = content_edit_widget.toPlainText()
-                    self.append_log(
+                    print(
                         "日志文件缓存加载: "
                         f"path={str(note_path)!r}, loaded={loaded}, chars={len(expected_content)}"
                     )
@@ -3249,11 +3909,12 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self.state.dirty = False
         self._update_title()
         self._update_token_labels()
+        self._sync_version_combo_on_open()
 
     def _verify_right_note_content(self, note: NoteDto | None, expected_content: str) -> None:
         """验证右侧编辑器是否已经显示目标笔记内容，并输出诊断日志。"""
         if not self._qt_is_valid(getattr(self, "content_edit", None)):
-            self.append_log("右侧内容验证跳过：content_edit 已失效")
+            print("右侧内容验证跳过：content_edit 已失效")
             return
         actual_content = self.content_edit.toPlainText()
         previous_sig = getattr(self, "_last_right_content_signature", None)
@@ -3270,7 +3931,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             name = parent.objectName() or parent.__class__.__name__
             parent_chain.append(f"{name}:visible={parent.isVisible()},hidden={parent.isHidden()}")
             parent = parent.parentWidget()
-        self.append_log(
+        print(
             "右侧内容验证: "
             f"note_id={note_id}, title={note_title!r}, "
             f"expected_chars={len(expected_content or '')}, actual_chars={len(actual_content)}, "
@@ -3296,7 +3957,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         try:
             self._auto_save_note("窗口关闭")
         except Exception as e:
-            self.append_log(f"窗口关闭时自动保存失败: {e}")
+            print(f"窗口关闭时自动保存失败: {e}")
         
         if self._allow_close:
             self._save_settings()
@@ -3309,7 +3970,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         event.ignore()
 
     def on_tray_message_log(self, message: str) -> None:
-        self.append_log(message)
+        print(message)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         if event.type() == QtCore.QEvent.Type.WindowStateChange:
@@ -3329,6 +3990,11 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._auto_save_note("窗口失去焦点", detail_ui=True)
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        # 中键拖拽调序（拖影 + 落点线）：仅在 notes_tree 的 viewport 上生效
+        tree = getattr(self, "notes_tree", None)
+        if tree is not None and watched is tree.viewport():
+            if self._handle_tree_mid_drag(tree, event):
+                return True
         # CodeEditorWidget 已代理所有常用方法，直接使用
         text_targets = {
             self.content_edit,
@@ -3345,6 +4011,16 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                     self.help_view.viewport(),
                 }
             )
+        # 鼠标离开日志编辑区且已修改：立即自动保存并生成历史版本
+        if event.type() == QtCore.QEvent.Type.Leave:
+            leave_targets = {self.content_edit, self.content_edit.viewport()}
+            try:
+                _ed = self.content_edit.editor()
+                leave_targets.update({_ed, _ed.viewport()})
+            except Exception:
+                pass
+            if watched in leave_targets:
+                self._maybe_autosave_log_on_leave()
         if watched in text_targets and event.type() == QtCore.QEvent.Type.Wheel:
             if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
                 delta = event.angleDelta().y()
@@ -3426,9 +4102,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.{ext}"
         save_path = images_dir / name
         if not img.save(str(save_path)):
-            self.append_log(f"图片保存失败：{save_path}")
+            print(f"图片保存失败：{save_path}")
             return None
-        self.append_log(f"图片已保存：{save_path.name}")
+        print(f"图片已保存：{save_path.name}")
         return str(save_path)
 
     def _paste_image_to_editor(self, editor: QtWidgets.QTextEdit, img: QtGui.QImage) -> None:
@@ -3448,9 +4124,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         try:
             shutil.copy2(str(src), str(dest))
         except Exception as exc:
-            self.append_log(f"复制图片失败：{exc}")
+            print(f"复制图片失败：{exc}")
             return
-        self.append_log(f"图片已复制：{dest.name}")
+        print(f"图片已复制：{dest.name}")
         self._do_insert_image(editor, str(dest))
 
     def _do_insert_image(self, editor: QtWidgets.QTextEdit, abs_path: str) -> None:
@@ -3583,50 +4259,57 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def show_from_hotkey(self) -> None:
-        self.append_log("收到快捷键触发，尝试显示到前台")
+        print("收到快捷键触发，尝试显示到前台")
+        top = self.window()
         # 恢复为正常宽度（如果之前被 Ctrl+中键 缩小到 400px）
         if hasattr(self, "_normal_width") and self._normal_width is not None:
-            self.resize(self._normal_width, self.height())
-            self.append_log(f"恢复正常宽度: {self._normal_width}px")
+            top.resize(self._normal_width, top.height())
+            print(f"恢复正常宽度: {self._normal_width}px")
         self._bring_to_front()
 
-    @QtCore.Slot()
-    def show_folder_favorites_from_hotkey(self) -> None:
+    @QtCore.Slot(int)
+    def show_folder_favorites_from_hotkey(self, caller_hwnd: int = 0) -> None:
         """Ctrl+鼠标 全局快捷键：将窗口右侧中部对齐鼠标位置，宽度设为400px，并切换到「文件夹收藏」标签。"""
-        self.append_log("收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签")
-        # 在 _bring_to_front 之前捕获前台窗口（此时前台窗口正是 Explorer）
-        try:
-            fg_hwnd = int(ctypes.windll.user32.GetForegroundWindow())
-            self.append_log(f"快捷键触发时前台窗口句柄: {fg_hwnd}")
-        except Exception:
-            fg_hwnd = 0
+        print("收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签")
+        # caller_hwnd 由 local_main 在唤起本窗口之前捕获（此刻前台正是调用者），
+        # 这里不要再调用 GetForegroundWindow，否则会把已被激活的本窗口识别成调用者。
+        fg_hwnd = int(caller_hwnd) if caller_hwnd else 0
+        if not fg_hwnd:
+            try:
+                fg_hwnd = int(ctypes.windll.user32.GetForegroundWindow())
+            except Exception:
+                fg_hwnd = 0
+        print(f"快捷键触发时前台窗口句柄: {fg_hwnd}")
         # 将前台窗口句柄传给收藏夹面板
         if self._folder_favorites_panel is not None and fg_hwnd:
             self._folder_favorites_panel.set_caller_hwnd(fg_hwnd)
         # 保存正常宽度，然后缩小到 400px
+        top = self.window()
         if not hasattr(self, "_normal_width") or self._normal_width is None:
-            self._normal_width = self.width()
+            self._normal_width = top.width()
         target_width = 400
-        self.resize(target_width, self.height())
-        self._bring_to_front()
-        # 将窗口右侧中部对齐鼠标光标位置
+        # 先把尺寸和位置全部算好并应用，最后再显示窗口，
+        # 避免“先以旧尺寸/旧位置显示、再 resize/move”导致的闪烁跳动。
         cursor_pos = QtGui.QCursor.pos()
-        win_height = self.height()
+        win_height = top.height()
+        top.resize(target_width, win_height)
         # 窗口右侧中部 = (x + width, y + height/2)，对齐到鼠标 => x=cursorX - width, y=cursorY - height/2
         new_x = cursor_pos.x() - target_width
         new_y = cursor_pos.y() - win_height // 2
-        # 确保窗口不超出屏幕上方
+        # 确保窗口不超出屏幕
         screen = QtWidgets.QApplication.screenAt(cursor_pos) or QtWidgets.QApplication.primaryScreen()
         if screen is not None:
             geo = screen.availableGeometry()
             new_y = max(geo.top(), min(new_y, geo.bottom() - win_height))
-            new_x = max(geo.left(), min(new_x, geo.right() - self.width()))
-        self.move(new_x, new_y)
+            new_x = max(geo.left(), min(new_x, geo.right() - target_width))
+        top.move(new_x, new_y)
         # 保存位置以便下次恢复
         self._saved_pos = QtCore.QPoint(new_x, new_y)
-        self.append_log(f"窗口右侧中部已对齐鼠标: cursor=({cursor_pos.x()},{cursor_pos.y()}), win_pos=({new_x},{new_y})")
+        print(f"窗口右侧中部已对齐鼠标: cursor=({cursor_pos.x()},{cursor_pos.y()}), win_pos=({new_x},{new_y})")
+        # 尺寸/位置就绪后再显示，保证首帧即为最终形态
+        self._bring_to_front()
         if self.tabs is None or self._folder_favorites_tab_index < 0:
-            self.append_log("警告: 未找到文件夹收藏标签页")
+            print("警告: 未找到文件夹收藏标签页")
             return
         self.tabs.setCurrentIndex(self._folder_favorites_tab_index)
         if self._folder_favorites_panel is not None:
@@ -3638,27 +4321,33 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             callback(button)
 
     def _bring_to_front(self) -> None:
-        is_hidden = self.isHidden()
-        is_minimized = bool(self.windowState() & QtCore.Qt.WindowState.WindowMinimized)
-        self.append_log(f"_bring_to_front: hidden={is_hidden}, minimized={is_minimized}, pos={self.pos().x()},{self.pos().y()}")
-        if hasattr(self, "_saved_pos"):
-            self.move(self._saved_pos)
-            self.append_log(f"恢复到保存位置: {self._saved_pos.x()},{self._saved_pos.y()}")
-        self.show()
-        self.showNormal()
-        self.setWindowState(
-            (self.windowState() & ~QtCore.Qt.WindowState.WindowMinimized)
+        # 本窗口可能已被 reparent 成外壳(L_FramelessMainWindow)的子部件，
+        # 所有窗口级操作必须作用于真正的顶层窗口，否则对子部件取 winId 会把它
+        # 提升成原生 topmost 子窗口，盖住兄弟控件导致点不动、不刷新。
+        top = self.window()
+        is_hidden = top.isHidden()
+        is_minimized = bool(top.windowState() & QtCore.Qt.WindowState.WindowMinimized)
+        print(f"_bring_to_front: hidden={is_hidden}, minimized={is_minimized}, pos={top.pos().x()},{top.pos().y()}")
+        # 注意：不要在这里 move 到 _saved_pos。
+        # _saved_pos 只在「Ctrl+鼠标 收藏夹」流程里设置（贴鼠标的弹窗位置），
+        # 该流程会在 _bring_to_front 之后自行显式 move 定位；而普通 Ctrl 双击恢复
+        # 时若 move 到这个陈旧位置，会让窗口跳到上次收藏夹的位置，而不是最小化前
+        # 的位置。showNormal() 本身已能恢复最小化前的几何。
+        top.show()
+        top.showNormal()
+        top.setWindowState(
+            (top.windowState() & ~QtCore.Qt.WindowState.WindowMinimized)
             | QtCore.Qt.WindowState.WindowActive
         )
-        self.raise_()
-        self.activateWindow()
-        self.append_log(f"show 后: hidden={self.isHidden()}, visible={self.isVisible()}, pos={self.pos().x()},{self.pos().y()}")
+        top.raise_()
+        top.activateWindow()
+        print(f"show 后: hidden={top.isHidden()}, visible={top.isVisible()}, pos={top.pos().x()},{top.pos().y()}")
         if sys.platform != "win32":
             return
         try:
             import ctypes
 
-            hwnd = int(self.winId())
+            hwnd = int(top.winId())
             user32 = ctypes.windll.user32
             hwnd_topmost = -1
             hwnd_notopmost = -2
@@ -3670,9 +4359,9 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
             user32.SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, flags)
             user32.SetWindowPos(hwnd, hwnd_notopmost, 0, 0, 0, 0, flags)
             user32.SetForegroundWindow(hwnd)
-            self.append_log("已调用 Windows 前台显示逻辑")
+            print("已调用 Windows 前台显示逻辑")
         except Exception as e:
-            self.append_log(f"Windows 前台显示逻辑失败: {e}")
+            print(f"Windows 前台显示逻辑失败: {e}")
 
     def _help_markdown_path(self) -> Path:
         return Path(__file__).resolve().parent / "help.md"
@@ -3680,79 +4369,253 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _load_help_page(self) -> None:
         """从 help.md 加载帮助页（Markdown 预览 + HTML 缓存）。"""
         if self.help_view is None:
-            self.append_log("help_view 为 None，跳过加载")
+            print("help_view 为 None，跳过加载")
             return
         path = self._help_markdown_path()
         fallback = "# L Notepad\n\n帮助文件未找到，请检查同目录下的 `help.md`。"
         if not path.exists():
-            self.append_log(f"帮助文件不存在: {path}")
+            print(f"帮助文件不存在: {path}")
         else:
-            self.append_log(f"加载帮助文件: {path}")
+            print(f"加载帮助文件: {path}")
             # 读取文件内容用于诊断
             try:
                 content = path.read_text(encoding="utf-8")
-                self.append_log(f"帮助文件内容长度: {len(content)} 字符, {len(content.splitlines())} 行")
+                print(f"帮助文件内容长度: {len(content)} 字符, {len(content.splitlines())} 行")
             except Exception as e:
-                self.append_log(f"读取帮助文件失败: {e}")
+                print(f"读取帮助文件失败: {e}")
         try:
             self.help_view.load_markdown_preview_file(path, fallback=fallback)
-            self.append_log("帮助页面加载完成")
+            print("帮助页面加载完成")
             # 检查 help_view 是否有内容
             if hasattr(self.help_view, 'toPlainText'):
                 text = self.help_view.toPlainText()
-                self.append_log(f"help_view 文本长度: {len(text)} 字符")
+                print(f"help_view 文本长度: {len(text)} 字符")
             if hasattr(self.help_view, 'toHtml'):
                 html = self.help_view.toHtml()
-                self.append_log(f"help_view HTML 长度: {len(html)} 字符")
+                print(f"help_view HTML 长度: {len(html)} 字符")
         except Exception as e:
-            self.append_log(f"帮助页面加载失败: {e}")
+            print(f"帮助页面加载失败: {e}")
             import traceback
-            self.append_log(traceback.format_exc())
-
-    @QtCore.Slot(str, str)
-    @QtCore.Slot(str)
-    def append_log(self, message: str, level: str = "INFO") -> None:
-        level = (level or "INFO").upper()
-        if level == "DEBUG" and self._log_level != "DEBUG":
-            return
-        if level == "DEBUG":
-            logger.debug(message)
-        elif level in {"WARNING", "WARN"}:
-            logger.warning(message)
-        elif level == "ERROR":
-            logger.error(message)
-        else:
-            logger.info(message)
-        ts = datetime.now().strftime("%H:%M:%S")
-        if self._qt_is_valid(getattr(self, "log_view", None)):
-            self.log_view.append_text_update_cache(
-                f"[{ts}] [{level}] {message}\n",
-                LOG_VIEW_CONTENT_CACHE_KEY,
-            )
-            # 滚动到底部
-            scrollbar = self.log_view.verticalScrollBar()
-            if scrollbar:
-                scrollbar.setValue(scrollbar.maximum())
-
-    def append_debug_log(self, message: str) -> None:
-        self.append_log(message, level="DEBUG")
+            print(traceback.format_exc())
 
     def _append_exception_log(self, title: str) -> None:
         detail = traceback.format_exc().rstrip()
-        self.append_log(f"{title}:\n{detail}")
+        self._append_console_line(f"ERROR {title}:\n{detail}")
 
     def _log_unhandled_exception(self, exc_type, exc_value, exc_traceback) -> None:
         detail = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback)).rstrip()
-        self.append_log(f"未捕获异常:\n{detail}")
+        self._append_console_line(f"ERROR 未捕获异常:\n{detail}")
         if getattr(self, "_previous_excepthook", None) is not None:
             self._previous_excepthook(exc_type, exc_value, exc_traceback)
 
     def _sort_notes(self, notes: list[NoteDto]) -> list[NoteDto]:
-        fav_rank = {nid: idx for idx, nid in enumerate(self._favorite_order)}
-        fav = [n for n in notes if self._is_favorite(n.id)]
-        fav.sort(key=lambda n: fav_rank.get(int(n.id), 10**9))
-        other = [n for n in notes if not self._is_favorite(n.id)]
-        return fav + other
+        # 默认按文件夹结构排序（目录字母序 + 文件名字母序）；
+        # 手动排序（self._note_order，按相对路径记录）优先生效。
+        rank = {p: i for i, p in enumerate(self._note_order)}
+
+        def key(n: NoteDto):
+            manual = rank.get(n.title)
+            if manual is not None:
+                return (0, manual, "", "")
+            folder, name = self._folder_struct_key(n.title)
+            return (1, 0, folder, name)
+
+        return sorted(notes, key=key)
+
+    @staticmethod
+    def _folder_struct_key(title: str) -> tuple[str, str]:
+        p = PurePosixPath((title or "").replace("\\", "/"))
+        parent = str(p.parent)
+        if parent in {".", ""}:
+            parent = ""
+        return (parent.lower(), p.name.lower())
+
+    @staticmethod
+    def _note_title_of_tree_item(item) -> str | None:
+        """返回笔记 item 的相对路径(title)，非笔记项返回 None。"""
+        if item is None:
+            return None
+        nid = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(nid, int):
+            return None
+        title = item.data(0, QtCore.Qt.ItemDataRole.UserRole + 1)
+        return str(title) if title else None
+
+    def _reorder_note_by_titles(self, src_title: str, dst_title: str, *, after: bool) -> None:
+        """把 src 笔记移动到 dst 笔记的前/后，写入全局手动排序并刷新。"""
+        try:
+            notes = self.api.list_notes()
+        except ApiError:
+            return
+        ordered = [n.title for n in self._sort_notes(notes)]
+        if src_title not in ordered or dst_title not in ordered or src_title == dst_title:
+            return
+        ordered.remove(src_title)
+        idx = ordered.index(dst_title)
+        ordered.insert(idx + 1 if after else idx, src_title)
+        self._note_order = ordered
+        self._save_note_order()
+        self.refresh_notes()
+        self.status.showMessage("已调整排序", 1500)
+
+    # ── 中键拖拽调序（拖影 + 落点线）────────────────────────────────
+    def _handle_tree_mid_drag(self, tree, event) -> bool:
+        Type = QtCore.QEvent.Type
+        et = event.type()
+        if et == Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.MiddleButton:
+            pos = event.position().toPoint()
+            item = tree.itemAt(pos)
+            title = self._note_title_of_tree_item(item)
+            if title is not None:
+                self._mid_drag_src_title = title
+                self._mid_drag_src_item = item
+                self._mid_drag_start_pos = pos
+                return True
+            return False
+        if et == Type.MouseMove and self._mid_drag_src_title is not None and not self._mid_dragging:
+            start = self._mid_drag_start_pos
+            if start is not None and (event.position().toPoint() - start).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                self._start_tree_mid_drag(tree)
+            return True
+        if et == Type.DragEnter and event.mimeData().hasFormat(NOTE_REORDER_MIME):
+            event.acceptProposedAction()
+            return True
+        if et == Type.DragMove and event.mimeData().hasFormat(NOTE_REORDER_MIME):
+            self._update_drop_indicator(tree, event.position().toPoint())
+            event.acceptProposedAction()
+            return True
+        if et == Type.DragLeave:
+            self._hide_drop_indicator()
+            return False
+        if et == Type.Drop and event.mimeData().hasFormat(NOTE_REORDER_MIME):
+            self._hide_drop_indicator()
+            src = bytes(event.mimeData().data(NOTE_REORDER_MIME)).decode("utf-8")
+            self._handle_drop(tree, event.position().toPoint(), src)
+            event.acceptProposedAction()
+            return True
+        return False
+
+    def _start_tree_mid_drag(self, tree) -> None:
+        item = self._mid_drag_src_item
+        start = self._mid_drag_start_pos
+        if item is None or start is None:
+            return
+        rect = tree.visualItemRect(item)
+        pixmap = tree.viewport().grab(rect)
+        mime = QtCore.QMimeData()
+        mime.setData(NOTE_REORDER_MIME, (self._mid_drag_src_title or "").encode("utf-8"))
+        drag = QtGui.QDrag(tree)
+        drag.setMimeData(mime)
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(start - rect.topLeft())
+        self._mid_dragging = True
+        try:
+            drag.exec(QtCore.Qt.DropAction.MoveAction)
+        finally:
+            self._mid_dragging = False
+            self._mid_drag_src_title = None
+            self._mid_drag_src_item = None
+            self._mid_drag_start_pos = None
+            self._hide_drop_indicator()
+
+    def _update_drop_indicator(self, tree, pos) -> None:
+        target = tree.itemAt(pos)
+        dst_folder = self._drop_target_folder(target)
+        if dst_folder is None:
+            self._hide_drop_indicator()
+            return
+        src_folder = self._folder_of_title(self._mid_drag_src_title or "")
+        rect = tree.visualItemRect(target)
+        if dst_folder == src_folder:
+            # 同文件夹：细线表示插入位置（仅当落在笔记项上）
+            if self._note_title_of_tree_item(target) is None:
+                self._hide_drop_indicator()
+                return
+            y = rect.bottom() if pos.y() > rect.center().y() else rect.top()
+            if self._drop_indicator is None:
+                self._drop_indicator = QtWidgets.QRubberBand(
+                    QtWidgets.QRubberBand.Shape.Line, tree.viewport()
+                )
+            self._drop_indicator.setGeometry(0, max(0, y - 1), tree.viewport().width(), 2)
+            self._drop_indicator.show()
+            if self._drop_box is not None:
+                self._drop_box.hide()
+        else:
+            # 跨文件夹：整行方框表示「移动到此文件夹」
+            if self._drop_box is None:
+                self._drop_box = QtWidgets.QRubberBand(
+                    QtWidgets.QRubberBand.Shape.Rectangle, tree.viewport()
+                )
+            self._drop_box.setGeometry(0, rect.top(), tree.viewport().width(), rect.height())
+            self._drop_box.show()
+            if self._drop_indicator is not None:
+                self._drop_indicator.hide()
+
+    def _hide_drop_indicator(self) -> None:
+        if self._drop_indicator is not None:
+            self._drop_indicator.hide()
+        if self._drop_box is not None:
+            self._drop_box.hide()
+
+    def _handle_drop(self, tree, pos, src_title: str) -> None:
+        target = tree.itemAt(pos)
+        dst_folder = self._drop_target_folder(target)
+        if dst_folder is None:
+            return
+        src_folder = self._folder_of_title(src_title)
+        if dst_folder == src_folder:
+            # 同文件夹内：记录手动排序
+            dst_title = self._note_title_of_tree_item(target)
+            if dst_title is None or dst_title == src_title:
+                return
+            rect = tree.visualItemRect(target)
+            after = pos.y() > rect.center().y()
+            self._reorder_note_by_titles(src_title, dst_title, after=after)
+        else:
+            # 跨文件夹：直接移动文件，不记录排序
+            self._move_note_to_folder(src_title, dst_folder)
+
+    def _move_note_to_folder(self, src_title: str, dst_folder: str) -> None:
+        item = self._mid_drag_src_item
+        note_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(note_id, int):
+            return
+        if not hasattr(self.api, "move_note"):
+            self._show_error("当前后端不支持移动文件")
+            return
+        try:
+            moved = self.api.move_note(note_id, dst_folder)
+        except ApiError as e:
+            self._show_error(str(e))
+            return
+        # 旧路径若在手动排序中，清理掉
+        if src_title in self._note_order:
+            self._note_order = [p for p in self._note_order if p != src_title]
+            self._save_note_order()
+        self.state.current_note_id = moved.id
+        self.refresh_notes()
+        self.status.showMessage(f"已移动到：{dst_folder or '未归档'}", 2000)
+
+    @staticmethod
+    def _folder_of_title(title: str) -> str:
+        p = PurePosixPath((title or "").replace("\\", "/"))
+        parent = str(p.parent)
+        return "" if parent in {".", ""} else parent
+
+    def _drop_target_folder(self, item) -> str | None:
+        """返回落点对应的目标文件夹路径（'' 表示根/未归档），非法目标返回 None。"""
+        if item is None:
+            return None
+        role = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(role, int):
+            # 笔记项 → 其所在文件夹
+            return self._folder_of_title(item.data(0, QtCore.Qt.ItemDataRole.UserRole + 1) or "")
+        if isinstance(role, str) and role.startswith("__folder__:"):
+            fp = role[len("__folder__:"):]
+            return "" if fp == "未归档" else fp
+        return None
+
+
 
     def _is_favorite(self, note_id: int | None) -> bool:
         if note_id is None:
@@ -3835,6 +4698,35 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         except Exception:
             self._tree_folder_expanded_state = {}
         load_indent_display_options_from_settings(self._settings)
+        self._load_note_order()
+
+    def _note_order_file(self) -> Path:
+        base = QtCore.QStandardPaths.writableLocation(
+            QtCore.QStandardPaths.StandardLocation.AppConfigLocation
+        )
+        d = Path(base or str(Path.home())) / "Lugwit" / "l_notepad_pc"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "note_order.json"
+
+    def _load_note_order(self) -> None:
+        try:
+            f = self._note_order_file()
+            if f.exists():
+                data = json.loads(f.read_text(encoding="utf-8"))
+                self._note_order = [str(x) for x in data] if isinstance(data, list) else []
+            else:
+                self._note_order = []
+        except Exception:
+            self._note_order = []
+
+    def _save_note_order(self) -> None:
+        try:
+            self._note_order_file().write_text(
+                json.dumps(self._note_order, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            builtins.print(f"保存手动排序失败: {exc}")
 
     @QtCore.Slot()
     def _apply_indent_display_settings(self) -> None:
@@ -3842,35 +4734,28 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         load_indent_display_options_from_settings(self._settings)
 
     def _restore_ai_tabs(self) -> None:
-        """从 notepad_list 目录中的问AI文件恢复 AI 标签页"""
-        notepad_list_dir = Path(__file__).resolve().parent / "notepad_list"
-        ask_ai_files = sorted(notepad_list_dir.glob("问AI*.md")) if notepad_list_dir.exists() else []
-        ask_ai_titles = {ask_ai_file.stem for ask_ai_file in ask_ai_files}
+        """恢复 AI 标签页。
 
-        self._ai_sessions = {
-            sid: sess for sid, sess in self._ai_sessions.items()
-            if sess.title in ask_ai_titles
-        }
+        以 QSettings 中已加载的会话(self._ai_sessions)为准重建全部标签页，
+        这样新建但尚未保存内容的空白 tab 也能在重启后保留。
+        旧版 notepad_list/问AI*.md 文件仅在会话草稿为空时用于兜底补充输入内容。
+        """
+        # 升序（问AI 1、问AI 2 …）：_sorted_ai_sessions 为新→旧，这里反转为旧→新
+        sessions = list(reversed(self._sorted_ai_sessions()))
+        if not sessions:
+            return
+
+        for session in sessions:
+            self._create_ai_tab(session)
+            # 兼容旧数据：会话本身没有草稿内容时，尝试从同名 .md 读取
+            if not session.draft_prompt:
+                self._load_ai_session_content(session)
+
+        # 校正当前会话指向
         if self._current_ai_session_id not in self._ai_sessions:
-            self._current_ai_session_id = None
+            self._current_ai_session_id = sessions[0].session_id
 
-        for ask_ai_file in ask_ai_files:
-            title = ask_ai_file.stem
-            existing_session = next(
-                (sess for sess in self._ai_sessions.values() if sess.title == title),
-                None,
-            )
-            if existing_session is None:
-                sid = str(QtCore.QDateTime.currentMSecsSinceEpoch()) + f"_{title}"
-                existing_session = AiSession(session_id=sid, title=title, messages=[])
-                self._ai_sessions[sid] = existing_session
-            if self._current_ai_session_id is None:
-                self._current_ai_session_id = existing_session.session_id
-
-            self._create_ai_tab(existing_session)
-            self._load_ai_session_content(existing_session)
-        
-        # 如果有当前会话，切换到对应标签页
+        # 切换到当前会话对应的标签页
         if self._current_ai_session_id:
             for i in range(self.ai_tabs.count()):
                 widget = self.ai_tabs.widget(i)
@@ -3897,7 +4782,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
                             content_edit.setPlainText(content)
                         break
             except Exception as exc:
-                self.append_log(f"加载问AI文件失败 {session.title}: {exc}")
+                print(f"加载问AI文件失败 {session.title}: {exc}")
 
     def _save_settings(self) -> None:
         try:
@@ -3943,7 +4828,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
     def _new_ai_session(self, select: bool = True) -> AiSession:
         # 如果会话数量超过10个，删除最旧的会话
         if len(self._ai_sessions) >= 10:
-            self.append_log("AI 会话超过上限，准备删除最旧会话")
+            print("AI 会话超过上限，准备删除最旧会话")
             self._remove_oldest_ai_session()
 
         sid = str(QtCore.QDateTime.currentMSecsSinceEpoch())
@@ -3952,7 +4837,7 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         self._ai_sessions[sid] = sess
         if select:
             self._current_ai_session_id = sid
-        self.append_log(f"创建 AI 会话: {sid} / {title} / select={select}")
+        print(f"创建 AI 会话: {sid} / {title} / select={select}")
         # 创建标签页
         self._create_ai_tab(sess)
         self._save_settings()
@@ -4024,8 +4909,8 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
         if self._qt_is_valid(getattr(self, "tab_count", None)):
             self.tab_count.setText(f"Tab: {count}")
         else:
-            self.append_log(f"tab_count 已失效，跳过显示更新: {count}")
-        self.append_log(f"AI标签页数量: {count}")
+            print(f"tab_count 已失效，跳过显示更新: {count}")
+        print(f"AI标签页数量: {count}")
 
     def _setup_ai_tab_close_button(self, index: int) -> None:
         """为指定索引的AI标签页设置关闭按钮"""
@@ -4216,54 +5101,30 @@ class MainWindow(TrayAwareMixin, QtWidgets.QMainWindow):
 
     def _render_ai_session_text(self, session: AiSession) -> str:
         chunks: list[str] = []
-        if not session.messages and not session.streaming_text:
+        if not session.messages and not session.streaming_text and not session.reasoning_text:
             return ""
-        for msg in session.messages:
+        # 最后一条 assistant 消息的索引（思考过程显示在其上方）
+        last_assistant = -1
+        for i, msg in enumerate(session.messages):
+            if msg.get("role") != "user":
+                last_assistant = i
+        reasoning_block = (
+            f"<思考过程>\n{session.reasoning_text}\n</思考过程>\n"
+            if session.reasoning_text
+            else ""
+        )
+        reasoning_emitted = False
+        for i, msg in enumerate(session.messages):
             role = "你" if msg.get("role") == "user" else "AI"
+            if reasoning_block and i == last_assistant:
+                chunks.append(reasoning_block)
+                reasoning_emitted = True
             chunks.append(f"{role}:\n{msg.get('content', '')}\n")
+        # 流式阶段（尚无最终 assistant 消息）：思考过程在输出内容上方
+        if reasoning_block and not reasoning_emitted:
+            chunks.append(reasoning_block)
         if session.streaming_text:
             chunks.append(f"AI(输出中):\n{session.streaming_text}")
-        return "\n".join(chunks).strip()
-
-    def _restore_window_state(self) -> None:
-        geo = self._settings.value("window/geometry")
-        if isinstance(geo, (bytes, bytearray)):
-            self.restoreGeometry(geo)
-
-        if session.streaming_text:
-            chunks.append(f"AI(输出中):\n{session.streaming_text}")
-        return "\n".join(chunks).strip()
-
-    def _restore_window_state(self) -> None:
-        geo = self._settings.value("window/geometry")
-        if isinstance(geo, (bytes, bytearray)):
-            self.restoreGeometry(geo)
-
-        return "\n".join(chunks).strip()
-
-    def _restore_window_state(self) -> None:
-        geo = self._settings.value("window/geometry")
-        if isinstance(geo, (bytes, bytearray)):
-            self.restoreGeometry(geo)
-
-        if isinstance(geo, (bytes, bytearray)):
-            self.restoreGeometry(geo)
-
-        return "\n".join(chunks).strip()
-
-    def _restore_window_state(self) -> None:
-        geo = self._settings.value("window/geometry")
-        if isinstance(geo, (bytes, bytearray)):
-            self.restoreGeometry(geo)
-
-            chunks.append(f"AI(输出中):\n{session.streaming_text}")
-        return "\n".join(chunks).strip()
-
-    def _restore_window_state(self) -> None:
-        geo = self._settings.value("window/geometry")
-        if isinstance(geo, (bytes, bytearray)):
-            self.restoreGeometry(geo)
-
         return "\n".join(chunks).strip()
 
     def _restore_window_state(self) -> None:

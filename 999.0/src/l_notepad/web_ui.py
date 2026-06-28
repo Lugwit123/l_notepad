@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import webbrowser
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -17,6 +18,10 @@ class WebNotepadWindow(L_FramelessMainWindow):
         self._settings = QtCore.QSettings("Lugwit", "l_notepad")
         self.resize(1100, 720)
         self._restore_window_state()
+        
+        # 设置帮助文档（更新日志）
+        changelog_path = os.path.join(os.path.dirname(__file__), "CHANGELOG.md")
+        self.setHelpDocument(changelog_path)
 
         # Try embedded web view; fall back to system browser if QtWebEngine is missing.
         try:
