@@ -11,6 +11,11 @@ from typing import TypedDict
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .folder_favorites_widget import (
+    _favorites_copy_to_clipboard,
+    _favorites_read_from_clipboard,
+)
+
 
 class AccountItem(TypedDict, total=False):
     """账号收藏项目类型定义"""
@@ -218,8 +223,8 @@ class AccountFavoritesWidget(QtWidgets.QWidget):
                 
             }
             QListWidget#account_favorites_list::item {
-                min-height: 28px;
-                padding: 4px 8px;
+                min-height: 18px;
+                padding: 1px 6px;
                 margin: 1px 0;
                 border-radius: 4px;
                 color: #e0e0e0;
@@ -274,6 +279,7 @@ class AccountFavoritesWidget(QtWidgets.QWidget):
             
             # 创建列表项
             item = QtWidgets.QListWidgetItem()
+            item.setSizeHint(QtCore.QSize(0, 20))  # 高度对齐文件夹收藏
             
             # 设置文本
             display_text = name
@@ -410,10 +416,7 @@ class AccountFavoritesWidget(QtWidgets.QWidget):
     def _show_context_menu(self, pos: QtCore.QPoint) -> None:
         """显示右键菜单"""
         current_item = self.list_widget.itemAt(pos)
-        if not current_item:
-            return
-
-        account = current_item.data(QtCore.Qt.ItemDataRole.UserRole)
+        account = current_item.data(QtCore.Qt.ItemDataRole.UserRole) if current_item else None
 
         menu = QtWidgets.QMenu(self)
 
@@ -439,7 +442,29 @@ class AccountFavoritesWidget(QtWidgets.QWidget):
             if has_copy_field:
                 menu.addSeparator()
 
-        menu.addAction(" 复制全部信息").triggered.connect(self._copy_account_info)
-        menu.addAction(" 编辑").triggered.connect(self._edit_account)
-        menu.addAction(" 删除").triggered.connect(self._remove_account)
+            menu.addAction(" 复制全部信息").triggered.connect(self._copy_account_info)
+            menu.addAction(" 复制条目").triggered.connect(
+                lambda checked=False, a=account: self._copy_item(a)
+            )
+            menu.addAction(" 编辑").triggered.connect(self._edit_account)
+            menu.addAction(" 删除").triggered.connect(self._remove_account)
+            menu.addSeparator()
+
+        paste_action = menu.addAction(" 粘贴条目")
+        paste_action.setEnabled(_favorites_read_from_clipboard() is not None)
+        paste_action.triggered.connect(self._paste_item)
         menu.exec(self.list_widget.mapToGlobal(pos))
+
+    # ── 跨标签复制/粘贴（保留来源类型）────────────────────────────
+    def _copy_item(self, account: dict) -> None:
+        if account:
+            _favorites_copy_to_clipboard(account)
+
+    def _paste_item(self) -> None:
+        data = _favorites_read_from_clipboard()
+        if data is None:
+            return
+        self._accounts.append(data)
+        self._save_favorites()
+        self._refresh_list()
+

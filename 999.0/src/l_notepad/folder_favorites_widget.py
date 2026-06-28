@@ -18,6 +18,37 @@ from typing import TypedDict
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
+# 三个收藏标签页（文件夹/网址/账号）通用的剪贴板条目载荷标记，用于跨标签复制粘贴
+FAV_ITEM_CLIPBOARD_MARKER = "__lnp_fav_item__"
+
+
+def _favorites_copy_to_clipboard(data: dict) -> None:
+    """把一条收藏数据（保留原始字段/类型）序列化到系统剪贴板。"""
+    try:
+        payload = json.dumps(
+            {FAV_ITEM_CLIPBOARD_MARKER: 1, "data": dict(data)},
+            ensure_ascii=False,
+        )
+        QtWidgets.QApplication.clipboard().setText(payload)
+    except Exception as e:
+        print(f"复制条目失败: {e}")
+
+
+def _favorites_read_from_clipboard() -> dict | None:
+    """从系统剪贴板读取收藏条目载荷，非本应用载荷返回 None。"""
+    try:
+        obj = json.loads(QtWidgets.QApplication.clipboard().text())
+    except Exception:
+        return None
+    if (
+        isinstance(obj, dict)
+        and obj.get(FAV_ITEM_CLIPBOARD_MARKER)
+        and isinstance(obj.get("data"), dict)
+    ):
+        return obj["data"]
+    return None
+
+
 class FavoriteItem(TypedDict, total=False):
     """收藏夹项目类型定义"""
     type: str  # "folder"、"command" 或 "url"
@@ -776,7 +807,17 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
         command_icon = self.style().standardIcon(QtWidgets.QStyle.SP_CommandLink)
     
         for fav in self.favorites:
-            item_type = fav.get("type", "folder")
+            item_type = fav.get("type", "")
+            if not item_type:
+                # 兼容旧数据 / 跨标签粘贴来的其它类型条目：按现有字段推断
+                if fav.get("path"):
+                    item_type = "folder"
+                elif fav.get("url"):
+                    item_type = "url"
+                elif fav.get("command"):
+                    item_type = "command"
+                else:
+                    item_type = "other"
     
             # 筛选
             if filter_type == 1 and item_type != "folder":
@@ -795,9 +836,13 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
                 name = fav.get("name", "")
                 display_text = f" {name}  —  {url}" if url else f" {name}"
                 icon = QtGui.QIcon()  # 网址暂无图标
-            else:
+            elif item_type == "command":
                 display_text = f" {fav.get('name', '')}"
                 icon = command_icon
+            else:
+                # 跨标签粘贴来的异类条目（如账号）：尽量显示名称
+                display_text = f" {fav.get('name', '') or fav.get('username', '') or '条目'}"
+                icon = QtGui.QIcon()
     
             item = QtWidgets.QListWidgetItem(icon, display_text)
             item.setSizeHint(QtCore.QSize(0, 20))
@@ -1266,8 +1311,44 @@ class FolderFavoritesWidget(QtWidgets.QWidget):
             remove_action.triggered.connect(self._remove_item)
             menu.addAction(remove_action)
 
+            menu.addSeparator()
+            copy_item_action = QtGui.QAction(" 复制条目", self)
+            copy_item_action.triggered.connect(
+                lambda checked=False, it=item: self._copy_item(it)
+            )
+            menu.addAction(copy_item_action)
+            paste_item_action = QtGui.QAction(" 粘贴条目", self)
+            paste_item_action.setEnabled(self._read_item_payload() is not None)
+            paste_item_action.triggered.connect(self._paste_item)
+            menu.addAction(paste_item_action)
+
             menu.exec(self.list_widget.mapToGlobal(position))
-        # 空白处右键不再显示菜单，所有添加操作都在标签页右键菜单中
+        else:
+            # 空白处：仅当剪贴板有可粘贴条目时显示「粘贴条目」
+            if self._read_item_payload() is not None:
+                menu = QtWidgets.QMenu()
+                paste_item_action = QtGui.QAction(" 粘贴条目", self)
+                paste_item_action.triggered.connect(self._paste_item)
+                menu.addAction(paste_item_action)
+                menu.exec(self.list_widget.mapToGlobal(position))
+
+    # ── 跨标签复制/粘贴（保留来源类型）────────────────────────────
+    def _read_item_payload(self) -> dict | None:
+        return _favorites_read_from_clipboard()
+
+    def _copy_item(self, item: QtWidgets.QListWidgetItem) -> None:
+        fav = item.data(QtCore.Qt.UserRole)
+        if isinstance(fav, dict):
+            _favorites_copy_to_clipboard(fav)
+
+    def _paste_item(self) -> None:
+        data = _favorites_read_from_clipboard()
+        if data is None:
+            return
+        self.favorites.append(data)
+        self._save_favorites()
+        self._refresh_list()
+
 
     def _copy_path_to_clipboard(self, path: str) -> None:
         """将路径复制到剪贴板"""
