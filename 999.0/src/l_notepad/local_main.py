@@ -6,6 +6,7 @@ import builtins
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -1284,12 +1285,24 @@ _REMOTE_CLIENT_EXES = {
     "sunloginclient.exe",  # 向日葵
     "todesk.exe",
     "rustdesk.exe",
+    "gameviewer.exe",     # 网易UU远程
 }
+
+# 运行时从配置追加的远控客户端进程名（小写），由 main() 从 QSettings 读取填充。
+# 用于网易UU远程等默认集合未覆盖的工具：把其 exe 名加进配置即可，无需改代码。
+_EXTRA_REMOTE_CLIENTS: set[str] = set()
+
+
+def _is_remote_client_name(name: str) -> bool:
+    """给定进程名（小写）是否为远程桌面/远控客户端。"""
+    return bool(name) and (
+        name in _REMOTE_CLIENT_EXES or name in _EXTRA_REMOTE_CLIENTS
+    )
 
 
 def _foreground_is_remote_client() -> bool:
     """前台窗口是否为远程桌面/远控客户端（按键将发往远程会话）。"""
-    return _foreground_process_name() in _REMOTE_CLIENT_EXES
+    return _is_remote_client_name(_foreground_process_name())
 
 
 def main(use_frameless: bool = True) -> int:
@@ -1330,6 +1343,17 @@ def main(use_frameless: bool = True) -> int:
     hotkey_key = str(settings.value("hotkey/double_key", DEFAULT_HOTKEY_KEY))
     if hotkey_key not in HOTKEY_OPTIONS:
         hotkey_key = DEFAULT_HOTKEY_KEY
+
+    # 追加远控客户端进程名（逗号/分号/空白分隔），用于覆盖默认集合未含的工具（如网易UU远程）。
+    extra_clients_raw = str(
+        settings.value("hotkey/extra_remote_clients", "") or ""
+    )
+    for tok in re.split(r"[,;\s]+", extra_clients_raw):
+        tok = tok.strip().lower()
+        if tok:
+            _EXTRA_REMOTE_CLIENTS.add(tok if tok.endswith(".exe") else tok + ".exe")
+    if _EXTRA_REMOTE_CLIENTS:
+        logging.info(f"远控客户端追加识别: {sorted(_EXTRA_REMOTE_CLIENTS)}")
 
     hotkey_ref: dict[str, DoubleKeyWatcher] = {}
 
@@ -1432,9 +1456,11 @@ def main(use_frameless: bool = True) -> int:
 
     def _on_ff_hotkey_triggered() -> None:
         # 前台是远程桌面客户端时抑制：按键实际发往远程会话，避免两台同时唤起。
-        if _foreground_is_remote_client():
-            logging.info("前台为远程桌面客户端，抑制本机 Ctrl+鼠标 热键")
+        fg = _foreground_process_name()
+        if _is_remote_client_name(fg):
+            logging.info(f"前台为远程客户端({fg})，抑制本机 Ctrl+鼠标 热键")
             return
+        logging.info(f"Ctrl+鼠标 热键触发，前台进程={fg or '?'}")
         # 关键：必须在唤起/激活本窗口之前捕获前台窗口（此刻正是调用者，如 Explorer），
         # 否则等 show_from_hotkey 把 l_notepad 提到前台后再读，就会把调用者识别成自身。
         caller_hwnd = 0
@@ -1476,9 +1502,11 @@ def main(use_frameless: bool = True) -> int:
 
     def _on_double_key_triggered() -> None:
         # 前台是远程桌面客户端时抑制：按键实际发往远程会话，避免两台同时唤起。
-        if _foreground_is_remote_client():
-            logging.info("前台为远程桌面客户端，抑制本机双击热键")
+        fg = _foreground_process_name()
+        if _is_remote_client_name(fg):
+            logging.info(f"前台为远程客户端({fg})，抑制本机双击热键")
             return
+        logging.info(f"双击热键触发，前台进程={fg or '?'}")
         QtCore.QMetaObject.invokeMethod(
             win, "show_from_hotkey", QtCore.Qt.ConnectionType.QueuedConnection
         )

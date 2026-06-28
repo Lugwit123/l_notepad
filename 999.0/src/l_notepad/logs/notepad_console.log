@@ -1,77 +1,15 @@
-2026-06-28 10:34:50,828 [INFO] console log file: D:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\rez-package-source\l_notepad\999.0\src\l_notepad\logs\notepad_console.log
-2026-06-28 10:34:50,829 [INFO] 触发按钮已切换为: Ctrl+中键
-2026-06-28 10:34:50,829 [INFO] WH_MOUSE_LL 钩子已安装 (handle=1001857891)
-2026-06-28 10:34:50,829 [INFO] Ctrl 轮询已启动 (QTimer 30ms)
-2026-06-28 10:34:50,829 [INFO] 文件夹收藏全局快捷键已启动 (Ctrl+鼠标)
-2026-06-28 10:34:51,161 [INFO] 启动低级键盘 Hook 双击 Ctrl 监听，有效间隔 0.05-0.23s
-2026-06-28 10:34:51,161 [INFO] 低级键盘 Hook 注册成功，等待双击 Ctrl
+2026-06-28 13:01:23,827 [INFO] console log file: D:\TD_Depot\Software\Lugwit_syncPlug\lugwit_insapp\trayapp\rez-package-source\l_notepad\999.0\src\l_notepad\logs\notepad_console.log
+2026-06-28 13:01:23,828 [INFO] 触发按钮已切换为: Ctrl+中键
+2026-06-28 13:01:23,828 [INFO] WH_MOUSE_LL 钩子已安装 (handle=1276318539)
+2026-06-28 13:01:23,828 [INFO] Ctrl 轮询已启动 (QTimer 30ms)
+2026-06-28 13:01:23,828 [INFO] 文件夹收藏全局快捷键已启动 (Ctrl+鼠标)
+2026-06-28 13:01:24,138 [INFO] 启动低级键盘 Hook 双击 Ctrl 监听，有效间隔 0.05-0.23s
+2026-06-28 13:01:24,138 [INFO] 低级键盘 Hook 注册成功，等待双击 Ctrl
 官网价格读取失败：RuntimeError('官网价格页未解析到文本模型价格')
-已复制路径到剪贴板: https://platform.deepseek.com/usage
-2026-06-28 11:52:41,429 [INFO] Ctrl 按下，间隔 0.157s（有效范围 0.05~0.23s 命中）
-2026-06-28 11:52:41,430 [INFO] 双击 Ctrl 已触发
+2026-06-28 13:01:28,569 [INFO] Ctrl 按下，间隔 0.188s（有效范围 0.05~0.23s 命中）
+2026-06-28 13:01:28,569 [INFO] 双击 Ctrl 已触发
 收到快捷键触发，尝试显示到前台
 恢复正常宽度: 980px
-_bring_to_front: hidden=False, minimized=False, pos=241,163
-show 后: hidden=False, visible=True, pos=241,163
-已调用 Windows 前台显示逻辑
-正在重启程序...
-准备重启程序...
-  - 启动方式: python -m
-  - 模块名称: l_notepad.local_main
-  - 命令: D:\td_depot\software\lugwit_syncplug\lugwit_insapp\trayapp\rez-package-3rd\python\3.12.10\python.exe -u -m l_notepad.local_main
-用户取消重启
-选择切换: item_id='__ask_ai__', selected=1
-切换到 AI 模式
-进入 AI 模式，session_id=None
-右侧面板切换: mode=ai, current_tab=0, ai_tabs_valid=True, ai_tabs=True, content_valid=True, content_edit=False, content_hidden=True, content_parent_visible=True, content_size=769x224, ai_answer_edit=False, ai_tabs_count=1
-尝试从当前 AI 标签页获取会话: index=0, session_id='1782468137002'
-AI 当前会话: 1782468137002 / 问AI 1
-AI 标签页数量: 1
-AI tabs visible after select: True
-当前 AI 标签页索引: 0
-定位到 AI 标签页索引: 0
-AI 控件可见性: True, changed=10
-AI 模式切换完成
-2026-06-28 12:14:54,341 [INFO] Ctrl+中键 已触发
-收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签
-快捷键触发时前台窗口句柄: 56241172
-收藏夹已记录调用者: hwnd=56241172, program='deadlinemonitor.exe', path=''
-窗口右侧中部已对齐鼠标: cursor=(799,481), win_pos=(399,161)
-_bring_to_front: hidden=False, minimized=False, pos=399,161
-show 后: hidden=False, visible=True, pos=399,161
-已调用 Windows 前台显示逻辑
-2026-06-28 12:15:17,378 [INFO] Ctrl+鼠标 快捷键已触发（轮询备用）
-收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签
-快捷键触发时前台窗口句柄: 0
-窗口右侧中部已对齐鼠标: cursor=(630,426), win_pos=(230,106)
-_bring_to_front: hidden=False, minimized=False, pos=230,106
-show 后: hidden=False, visible=True, pos=230,106
-已调用 Windows 前台显示逻辑
-2026-06-28 12:15:18,067 [INFO] Ctrl+鼠标 快捷键已触发（轮询备用）
-收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签
-快捷键触发时前台窗口句柄: 0
-窗口右侧中部已对齐鼠标: cursor=(640,431), win_pos=(240,111)
-_bring_to_front: hidden=False, minimized=False, pos=240,111
-show 后: hidden=False, visible=True, pos=240,111
-已调用 Windows 前台显示逻辑
-2026-06-28 12:15:18,215 [INFO] Ctrl 按下，间隔 0.156s（有效范围 0.05~0.23s 命中）
-2026-06-28 12:15:18,215 [INFO] 双击 Ctrl 已触发
-收到快捷键触发，尝试显示到前台
-恢复正常宽度: 980px
-_bring_to_front: hidden=False, minimized=False, pos=240,111
-show 后: hidden=False, visible=True, pos=240,111
-已调用 Windows 前台显示逻辑
-2026-06-28 12:15:32,253 [INFO] Ctrl+鼠标 快捷键已触发（轮询备用）
-收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签
-快捷键触发时前台窗口句柄: 0
-窗口右侧中部已对齐鼠标: cursor=(500,95), win_pos=(100,0)
-_bring_to_front: hidden=False, minimized=False, pos=100,0
-show 后: hidden=False, visible=True, pos=100,0
-已调用 Windows 前台显示逻辑
-2026-06-28 12:15:32,590 [INFO] Ctrl+中键 已触发
-收到文件夹收藏快捷键 (Ctrl+鼠标)，对齐鼠标位置并切换到收藏标签
-快捷键触发时前台窗口句柄: 0
-窗口右侧中部已对齐鼠标: cursor=(557,55), win_pos=(157,0)
-_bring_to_front: hidden=False, minimized=False, pos=157,0
-show 后: hidden=False, visible=True, pos=157,0
+_bring_to_front: hidden=False, minimized=False, pos=534,216
+show 后: hidden=False, visible=True, pos=534,216
 已调用 Windows 前台显示逻辑
