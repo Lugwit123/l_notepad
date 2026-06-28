@@ -1221,6 +1221,77 @@ class MainWindow(L_FramelessMainWindow):
 
 
 
+def _foreground_process_name() -> str:
+    """返回当前前台窗口所属进程的可执行文件名（小写）。失败返回空串。"""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD
+        ]
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+        )
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buf))
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, buf, ctypes.byref(size)
+            ):
+                return ""
+            return os.path.basename(buf.value).lower()
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return ""
+
+
+# 远程桌面/远控客户端进程名：当本机前台是这些窗口时，按键实际发往远程会话，
+# 本机的全局热键应抑制，避免远程与本地两台 l_notepad 同时被唤起。
+_REMOTE_CLIENT_EXES = {
+    "mstsc.exe",          # 微软远程桌面
+    "msrdc.exe",          # Windows App / RD client
+    "cmrcviewer.exe",     # SCCM 远程控制
+    "vncviewer.exe",
+    "tvnviewer.exe",
+    "anydesk.exe",
+    "sunloginclient.exe",  # 向日葵
+    "todesk.exe",
+    "rustdesk.exe",
+}
+
+
+def _foreground_is_remote_client() -> bool:
+    """前台窗口是否为远程桌面/远控客户端（按键将发往远程会话）。"""
+    return _foreground_process_name() in _REMOTE_CLIENT_EXES
+
+
 def main(use_frameless: bool = True) -> int:
     _set_windows_appid("Lugwit.l_notepad.pc")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
@@ -1360,6 +1431,10 @@ def main(use_frameless: bool = True) -> int:
     ff_hotkey = FolderFavoritesHotkeyService(win)
 
     def _on_ff_hotkey_triggered() -> None:
+        # 前台是远程桌面客户端时抑制：按键实际发往远程会话，避免两台同时唤起。
+        if _foreground_is_remote_client():
+            logging.info("前台为远程桌面客户端，抑制本机 Ctrl+鼠标 热键")
+            return
         # 关键：必须在唤起/激活本窗口之前捕获前台窗口（此刻正是调用者，如 Explorer），
         # 否则等 show_from_hotkey 把 l_notepad 提到前台后再读，就会把调用者识别成自身。
         caller_hwnd = 0
@@ -1399,10 +1474,17 @@ def main(use_frameless: bool = True) -> int:
     def _log_double_key(message: str, level: int = logging.INFO) -> None:
         logging.getLogger(__name__).log(level, message)
 
-    hotkey = DoubleKeyWatcher(
-        lambda: QtCore.QMetaObject.invokeMethod(
+    def _on_double_key_triggered() -> None:
+        # 前台是远程桌面客户端时抑制：按键实际发往远程会话，避免两台同时唤起。
+        if _foreground_is_remote_client():
+            logging.info("前台为远程桌面客户端，抑制本机双击热键")
+            return
+        QtCore.QMetaObject.invokeMethod(
             win, "show_from_hotkey", QtCore.Qt.ConnectionType.QueuedConnection
-        ),
+        )
+
+    hotkey = DoubleKeyWatcher(
+        _on_double_key_triggered,
         log_callback=_log_double_key,
         min_gap_sec=DOUBLE_CTRL_MIN_GAP_SEC,
         max_gap_sec=max_gap_sec,
